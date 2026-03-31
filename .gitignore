@@ -1,0 +1,13 @@
+# runtime generated vector index
+pgdata2/
+
+# python cache
+__pycache__/
+*.pyc
+
+# optional: local data
+*.log
+*.tmp
+
+# third-party libraries
+third_party/

@@ -1,0 +1,46 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg15-trixie
+    container_name: postgres_db_2
+    environment:
+      POSTGRES_USER: gq210
+      POSTGRES_PASSWORD: 123456
+      POSTGRES_DB: postgres
+      TZ: Asia/Shanghai
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./pgdata2:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  
+  redis:
+    image: redis:latest
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - app-network
+
+volumes:
+  pgdata:
+  redis-data:
+
+networks:
+  app-network:
+    driver: bridge
+
