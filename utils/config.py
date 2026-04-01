@@ -19,7 +19,8 @@ class Config:
     REDIS_HOST = "localhost"
     REDIS_PORT = 6379
     REDIS_DB = 0
-    SESSION_TIMEOUT = 3600
+    SESSION_TIMEOUT = 300
+    TTL = 3600
 
     # openai:调用gpt模型,qwen:调用阿里通义千问大模型,oneapi:调用oneapi方案支持的模型,ollama:调用本地开源大模型
     LLM_TYPE = "qwen"

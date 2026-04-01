@@ -14,12 +14,12 @@ client = MultiServerMCPClient(
             "args": ["-y", "12306-mcp"]
         },
         "map-mcp": {
-            "transport": "http",
+            "transport": "streamable_http",
             "url":f"https://mcp.amap.com/mcp?key={amap_key}",
     
         },
         "flight-ticket-mcp": {
-            "transport": "http",
+            "transport": "streamable_http",
             "url": "http://localhost:8016/mcp"
         }
     } # type: ignore
