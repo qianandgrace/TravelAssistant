@@ -2,15 +2,14 @@
 import os
 import logging
 import sys
-from langchain_openai import ChatOpenAI,OpenAIEmbeddings
-from langchain_huggingface.embeddings import HuggingFaceEmbeddings
+from langchain_openai import ChatOpenAI
 from langchain_community.embeddings import HuggingFaceBgeEmbeddings
 # 将项目根目录加入 sys.path，保证包内引用可用（以便从项目根运行脚本）
 CURRENT_DIR = os.path.dirname(__file__)
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, os.pardir)) # 调试断点，检查路径设置是否正确
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-from configs.config_loader import config
+from utils.config import config
 
 # 设置日志模版
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')

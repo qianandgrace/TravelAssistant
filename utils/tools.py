@@ -1,18 +1,29 @@
+import os
+
 from langchain_core.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_core.tools import tool
 
-from utils.utils import add_human_in_the_loop
-
-
+amap_key=os.getenv("AMAP_MAPS_API_KEY")
 ######### mcp tools ##########
-client = MultiServerMCPClient({
-        # 12306 mcp key, 查询余票等功能
-        "12306-streamableHTTP": {
-            "url": "http://127.0.0.1:8166/mcp",
-            "transport": "streamable_http",
+client = MultiServerMCPClient(
+    {
+        "12306-mcp": {
+            "transport": "stdio",
+            "command": "npx",
+            "args": ["-y", "12306-mcp"]
+        },
+        "map-mcp": {
+            "transport": "http",
+            "url":f"https://mcp.amap.com/mcp?key={amap_key}",
+    
+        },
+        "flight-ticket-mcp": {
+            "transport": "http",
+            "url": "http://localhost:8016/mcp"
         }
-    })
+    } # type: ignore
+)
 
 
 @tool("book_hotel",description="需要人工审查/批准的预定酒店的工具")
@@ -29,9 +40,6 @@ def book_railway(train_number: str):
 async def get_tools():
     all_tools = await client.get_tools()
     # all_tools.append(book_railway)
-    all_tools.append((await add_human_in_the_loop(book_railway)))
-    # add_human_tools = [await add_human_in_the_loop(index) for index in all_tools[8:]]
-    # tools = all_tools[:8] + add_human_tools
     return all_tools
 
 

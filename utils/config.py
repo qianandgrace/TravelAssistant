@@ -27,3 +27,5 @@ class Config:
     # API服务地址和端口
     HOST = "0.0.0.0"
     PORT = 8001
+
+config = Config()
