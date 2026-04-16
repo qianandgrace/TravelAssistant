@@ -73,6 +73,8 @@ def save_graph_visualization(graph: StateGraph, filename: str = "graph.png") -> 
     except IOError as e:
         # 记录警告日志
         print.warning(f"Failed to save graph visualization: {e}")
+
+
 # Build workflow
 agent_builder = StateGraph(MessagesState)
 
@@ -98,7 +100,7 @@ save_graph_visualization(agent, "agent_graph.png")
 
 # Invoke
 async def main():
-    messages = [HumanMessage(content="查询下明天北京的天气!")]
+    messages = [HumanMessage(content="我在上海，4月2日要去北京，帮我查下这天上午8点到9点出发的高铁余票，并查询下北京那天的天气!")]
     out = await agent.ainvoke({"messages": messages})
     for m in out["messages"]:
         m.pretty_print()
