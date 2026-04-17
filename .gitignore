@@ -11,3 +11,4 @@ __pycache__/
 
 # third-party libraries
 third_party/
+logfile/
