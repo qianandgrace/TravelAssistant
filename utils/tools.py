@@ -8,20 +8,20 @@ amap_key=os.getenv("AMAP_MAPS_API_KEY")
 ######### mcp tools ##########
 client = MultiServerMCPClient(
     {
-        "12306-mcp": {
-            "transport": "stdio",
-            "command": "npx",
-            "args": ["-y", "12306-mcp"]
-        },
+        # "12306-mcp": {
+        #     "transport": "stdio",
+        #     "command": "npx",
+        #     "args": ["-y", "12306-mcp"]
+        # },
         "map-mcp": {
             "transport": "streamable_http",
             "url":f"https://mcp.amap.com/mcp?key={amap_key}",
     
         },
-        "flight-ticket-mcp": {
-            "transport": "streamable_http",
-            "url": "http://localhost:8016/mcp"
-        }
+        # "flight-ticket-mcp": {
+        #     "transport": "streamable_http",
+        #     "url": "http://localhost:8016/mcp"
+        # }
     } # type: ignore
 )
 
