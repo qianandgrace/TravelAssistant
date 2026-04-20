@@ -5,6 +5,9 @@ from langchain.tools import tool
 from langchain.agents import create_agent
 
 from utils.llm import get_llm, get_single_llm
+from langchain.agents.middleware import HumanInTheLoopMiddleware 
+from langgraph.checkpoint.memory import InMemorySaver 
+from langgraph.types import Command 
 
 # Initialize LLM
 model = get_single_llm()
@@ -64,6 +67,12 @@ calendar_agent = create_agent(
     model,
     tools=[create_calendar_event, get_available_time_slots],
     system_prompt=CALENDAR_AGENT_PROMPT,
+    middleware=[
+        HumanInTheLoopMiddleware(
+            interrupt_on={"create_calendar_event": True},
+            description_prefix="Calendar event pending approval",
+        ),
+    ],
 )
 
 # create email agent
@@ -79,6 +88,12 @@ email_agent = create_agent(
     model,
     tools=[send_email],
     system_prompt=EMAIL_AGENT_PROMPT,
+    middleware=[
+        HumanInTheLoopMiddleware(
+            interrupt_on={"send_email": True},
+            description_prefix="Outbound email pending approval",
+        ),
+    ],
 )
 
 # define subagents as tools
@@ -127,6 +142,7 @@ supervisor_agent = create_agent(
     model,
     tools=[schedule_event, manage_email],
     system_prompt=SUPERVISOR_PROMPT,
+    checkpointer=InMemorySaver()
 )
 
 if __name__ == "__main__":
@@ -141,13 +157,50 @@ if __name__ == "__main__":
     #             message.pretty_print()
     # Example 2,Multi-domain request
     query = (
-    "Schedule a meeting with the design team next Tuesday at 2pm for 1 hour, "
-    "and send them an email reminder about reviewing the new mockups."
+        "Schedule a meeting with jack and mary next Tuesday at 2pm for 1 hour and send them a reminder email about the meeting."
+        "address of jack and mary is jack.doe@example.com and mary.smith@example.com."
     )
 
+    config = {"configurable": {"thread_id": "6"}}
+
+    interrupts = []
     for step in supervisor_agent.stream(
-        {"messages": [{"role": "user", "content": query}]}
+        {"messages": [{"role": "user", "content": query}]},
+        config,
     ):
         for update in step.values():
-            for message in update.get("messages", []):
-                message.pretty_print()
+            if isinstance(update, dict):
+                for message in update.get("messages", []):
+                    message.pretty_print()
+            else:
+                interrupt_ = update[0]
+                interrupts.append(interrupt_)
+                print(f"\nINTERRUPTED: {interrupt_.id}")
+        
+    # Print all interrupts and their associated action requests
+    print("\nAll Interrupts and their Action Requests:")
+    resume = {}
+    for interrupt in interrupts:
+        if interrupt_.id == "b269647f904245106c16551d05536a79":
+            # Edit email
+            edited_action = interrupt_.value["action_requests"][0].copy()
+            edited_action["args"]["subject"] = "Mockups reminder"
+            resume[interrupt_.id] = {
+                "decisions": [{"type": "edit", "edited_action": edited_action}]
+            }
+        else:
+            resume[interrupt_.id] = {"decisions": [{"type": "approve"}]}
+        
+    interrupts = []
+    for step in supervisor_agent.stream(
+        Command(resume=resume),
+        config,
+    ):
+        for update in step.values():
+            if isinstance(update, dict):
+                for message in update.get("messages", []):
+                    message.pretty_print()
+            else:
+                interrupt_ = update[0]
+                interrupts.append(interrupt_)
+                print(f"\nINTERRUPTED: {interrupt_.id}")
