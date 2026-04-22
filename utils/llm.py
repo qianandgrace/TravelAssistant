@@ -161,12 +161,12 @@ if __name__ == "__main__":
     try:
         # 测试不同类型的LLM初始化
         # llm_openai = get_llm("openai")
-        # llm_chat, llm_embedding = get_llm("openai")
+        llm_chat, llm_embedding = get_llm("openai")
         llm = get_single_llm("openai")
         print(llm.invoke(["Hello, world!"]))
         # 测试embedding生成
-        # embeddings = llm_embedding.embed_documents(["Hello, world!", "How are you?"])
-        # print(len(embeddings), len(embeddings[0]))  # 输出嵌入的数量和维度
+        embeddings = llm_embedding.embed_documents(["Hello, world!", "How are you?"])
+        print(len(embeddings), len(embeddings[0]))  # 输出嵌入的数量和维度
         # llm_invalid = get_llm("invalid_type")
     except LLMInitializationError as e:
         logger.error(f"程序终止: {str(e)}")
