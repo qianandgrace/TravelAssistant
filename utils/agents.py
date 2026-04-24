@@ -204,14 +204,7 @@ async def main():
         user = Context(user_id="gq")
 
         namespace = (user_id, "travel preferences")
-
-        # ✅ 唯一 thread
-        thread = {
-            "configurable": {
-                "thread_id": f"{user_id}_{uuid.uuid4()}"
-            }
-        }
-
+      
     
         # ✅ 唯一 thread
         thread = {
@@ -228,7 +221,7 @@ async def main():
                 break
             # 查询用户记忆
             # ===== 读取记忆 =====
-            item = await store.aget(namespace, "user_preference")
+            item = await store.aget(namespace, "travel_preference")
             memory_text = item.value["text"] if item else ""
 
             final_input = f"{user_input}，用户偏好：{memory_text}"
