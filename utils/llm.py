@@ -22,7 +22,7 @@ MODEL_CONFIGS = {
     "openai": {
         "base_url": "https://api.laozhang.ai/v1",
         "api_key": os.getenv("LAOZHANG_API_KEY"),
-        "chat_model": "gpt-5-chat-latest"
+        "chat_model": "gpt-4o-mini"
     },
     "qwen": {
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
