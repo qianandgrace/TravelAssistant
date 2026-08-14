@@ -1,0 +1,11 @@
+# 旅游行程规划项目依赖（LangGraph Workflow 版）
+# 建议在 conda 环境 travel_assistant 中运行
+langgraph>=1.1.6
+langchain-core>=1.2.23
+langchain-openai>=1.1.12
+langchain-mcp-adapters>=0.2.2
+mcp>=1.26.0
+python-dotenv>=1.0
+# 运行 `python main.py` 时保存 workflow 图快照（graph/*.png / *.txt）
+pygraphviz>=1.11
+grandalf>=0.8

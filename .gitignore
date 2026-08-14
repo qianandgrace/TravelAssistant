@@ -12,3 +12,9 @@ __pycache__/
 # third-party libraries
 third_party/
 logfile/
+
+# 每次运行生成的 graph 快照
+graph/
+
+# env 文件
+.env

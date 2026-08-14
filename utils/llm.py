@@ -9,26 +9,29 @@ CURRENT_DIR = os.path.dirname(__file__)
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, os.pardir)) # 调试断点，检查路径设置是否正确
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+from dotenv import load_dotenv
+
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 from utils.config import config
 
 # 设置日志模版
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# 模型配置字典
+# 模型配置字典：API key 与 base_url 均从 .env 读取（key 名与 .env 一致）
 MODEL_CONFIGS = {
     "openai": {
-        "base_url": "https://api.laozhang.ai/v1",
+        "base_url": os.getenv("LAOZHANG_BASE_URL", "https://api.laozhang.ai/v1"),
         "api_key": os.getenv("LAOZHANG_API_KEY"),
         "chat_model": "gpt-4o-mini"
     },
     "qwen": {
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "api_key": os.getenv("DASHSCOPE_API_KEY"),
+        "base_url": os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        "api_key": os.getenv("QWEN_API_KEY"),
         "chat_model": "qwen-max",
     },
     "deepseek": {
-        "base_url": "https://api.deepseek.com/v1",
+        "base_url": os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
         "api_key": os.getenv("DEEPSEEK_API_KEY"),
         "chat_model": "deepseek-chat",
     },
@@ -152,6 +155,25 @@ def get_llm(llm_type: str = DEFAULT_LLM_TYPE) -> tuple[ChatOpenAI, HuggingFaceBg
         raise  # 如果默认配置也失败，则抛出异常
 
 
+async def acall_with_fallback(messages, llm_chain: list[str] | None = None):
+    """按优先级链调用 LLM，某一家失败（无 key / 超时 / 报错）自动切换下一家。
+
+    默认回退链来自 config.LLM_FALLBACK_CHAIN（qwen -> deepseek -> openai）。
+    全部失败时抛出 LLMInitializationError。
+    """
+    chain = llm_chain or config.LLM_FALLBACK_CHAIN
+    last_err = None
+    for llm_type in chain:
+        try:
+            llm = get_single_llm(llm_type)
+            logger.info("使用 %s 调用 LLM", llm_type)
+            return await llm.ainvoke(messages)
+        except Exception as e:  # noqa: BLE001 - 需要拦截所有失败以尝试下一家
+            last_err = e
+            logger.warning("LLM %s 调用失败：%s，切换下一家", llm_type, e)
+    raise LLMInitializationError(
+        f"回退链 {chain} 全部调用失败，最后错误：{last_err}"
+    )
 
 
 # 示例使用

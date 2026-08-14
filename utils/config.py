@@ -1,4 +1,10 @@
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# 加载项目根目录的 .env（无论从哪个目录启动都定位到项目根）
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
 class Config:
@@ -24,9 +30,13 @@ class Config:
     CELERY_BROKER_URL = "redis://localhost:6379/0"
     TASK_TTL = 3600
 
-    # openai:调用gpt模型,qwen:调用阿里通义千问大模型,oneapi:调用oneapi方案支持的模型,ollama:调用本地开源大模型
-    LLM_TYPE = "qwen"
-    
+    # openai:调用gpt模型,qwen:调用阿里通义千问大模型,deepseek:调用deepseek大模型
+    # 默认 qwen；可用环境变量 LLM_TYPE 覆盖
+    LLM_TYPE = os.getenv("LLM_TYPE", "qwen")
+
+    # LLM 回退链：某一家无 key / 调用失败时依次切换下一家
+    LLM_FALLBACK_CHAIN = ["qwen", "deepseek", "openai"]
+
 
     # API服务地址和端口
     HOST = "0.0.0.0"
