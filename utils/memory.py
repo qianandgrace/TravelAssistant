@@ -19,15 +19,25 @@ from utils.llm import get_embedding_model
 
 logger = logging.getLogger(__name__)
 
-# 语义索引配置：对 value["content"] 字段做 embedding
-_STORE_INDEX = {
-    "dims": 768,
-    "embed": get_embedding_model(),
-    "fields": ["content"],
-}
+# 语义索引配置：对 value["content"] 字段做 embedding。
+# 惰性构建（首次进入 __aenter__ 时才加载 bge 模型），避免 FastAPI server 一 import 就加载 embedding。
+_STORE_INDEX = None
 
-EPISODIC_NS = ("memory", "episodic")
-SEMANTIC_NS = ("memory", "semantic")
+
+def _get_store_index() -> dict:
+    global _STORE_INDEX
+    if _STORE_INDEX is None:
+        _STORE_INDEX = {
+            "dims": 768,
+            "embed": get_embedding_model(),
+            "fields": ["content"],
+        }
+    return _STORE_INDEX
+
+
+# 命名空间基础（传入 user_id 时按用户隔离）
+_BASE_EPISODIC_NS = ("memory", "episodic")
+_BASE_SEMANTIC_NS = ("memory", "semantic")
 
 
 class MemoryManager:
@@ -37,19 +47,35 @@ class MemoryManager:
         async with MemoryManager() as memory:
             graph = build_workflow(map_tools, memory=memory)
             ...
+    传 user_id 时长期记忆按用户隔离（命名空间加一层 user_id），多用户互不可见；
+    不传则保持全局共享（CLI 传参模式）。
     """
 
-    def __init__(self, conn_string: str | None = None):
+    def __init__(self, conn_string: str | None = None, user_id: str | None = None):
         self.conn_string = conn_string or config.DB_URI
+        self.user_id = user_id
         self._store = None
         self._store_cm = None
         self._saver = None
         self._saver_cm = None
 
+    # ---- 命名空间（按用户隔离）----
+    def _episodic_ns(self):
+        return ("memory", self.user_id, "episodic") if self.user_id else _BASE_EPISODIC_NS
+
+    def _semantic_ns(self):
+        return ("memory", self.user_id, "semantic") if self.user_id else _BASE_SEMANTIC_NS
+
+    def _notes_ns(self):
+        return ("memory", self.user_id, "notes") if self.user_id else ("memory", "notes")
+
+    def _retrieve_prefix(self):
+        return ("memory", self.user_id) if self.user_id else ("memory",)
+
     # ---- 生命周期 ----
     async def __aenter__(self) -> "MemoryManager":
         self._store_cm = AsyncPostgresStore.from_conn_string(
-            self.conn_string, index=_STORE_INDEX
+            self.conn_string, index=_get_store_index()
         )
         self._store = await self._store_cm.__aenter__()
         self._saver_cm = AsyncPostgresSaver.from_conn_string(self.conn_string)
@@ -101,7 +127,7 @@ class MemoryManager:
         )
         key = f"{destination}_{now}_{uuid4().hex[:6]}"
         await self._store.aput(
-            EPISODIC_NS,
+            self._episodic_ns(),
             key,
             {
                 "content": content,
@@ -122,7 +148,7 @@ class MemoryManager:
                 continue
             key = f"{destination}_{uuid4().hex[:6]}"
             await self._store.aput(
-                SEMANTIC_NS,
+                self._semantic_ns(),
                 key,
                 {
                     "content": f"关于{destination}的旅游知识：{text}",
@@ -135,14 +161,30 @@ class MemoryManager:
 
     # ---- 长期记忆：检索 ----
     async def retrieve(self, query: str, limit: int = 6) -> str:
-        """语义检索 episodic + semantic，返回可直接注入 prompt 的文本。"""
+        """语义检索该用户命名空间下的 episodic/semantic/notes，返回可直接注入 prompt 的文本。"""
         items = await self._store.asearch(
-            ("memory",), query=query, limit=limit
+            self._retrieve_prefix(), query=query, limit=limit
         )
         if not items:
             return ""
+        labels = {"episodic": "偏好/经验", "semantic": "旅游知识", "notes": "用户笔记"}
         lines = []
         for it in items:
-            ns = "偏好/经验" if it.namespace == EPISODIC_NS else "旅游知识"
-            lines.append(f"- [{ns}] {it.value.get('content', '')}")
+            last = it.namespace[-1] if it.namespace else ""
+            label = labels.get(last, "记忆")
+            lines.append(f"- [{label}] {it.value.get('content', '')}")
         return "\n".join(lines)
+
+    # ---- 长期记忆：用户自定义笔记 ----
+    async def write_user_memory(self, user_id: str, text: str) -> None:
+        """写一条用户自定义的长期记忆（如偏好设置），存入该用户命名空间。"""
+        text = text.strip()
+        if not text:
+            return
+        key = f"note_{datetime.datetime.now():%Y%m%d_%H%M%S}_{uuid4().hex[:6]}"
+        await self._store.aput(
+            self._notes_ns(),
+            key,
+            {"content": text, "user_id": user_id},
+        )
+        logger.info("已保存用户 %s 的长期记忆：%s", user_id, key)

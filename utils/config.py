@@ -13,7 +13,7 @@ class Config:
     LOG_FILE = "logfile/app.log"
     if not os.path.exists(os.path.dirname(LOG_FILE)):
         os.makedirs(os.path.dirname(LOG_FILE))
-    MAX_BYTES = 5*1024*1024,
+    MAX_BYTES = 5 * 1024 * 1024
     BACKUP_COUNT = 3
 
     # PostgreSQL数据库配置参数
@@ -21,14 +21,19 @@ class Config:
     MIN_SIZE = 5
     MAX_SIZE = 10
 
-    # Redis数据库配置参数
-    REDIS_HOST = "localhost"
-    REDIS_PORT = 6379
-    REDIS_DB = 0
-    SESSION_TIMEOUT = 300
-    TTL = 3600
-    CELERY_BROKER_URL = "redis://localhost:6379/0"
-    TASK_TTL = 3600
+    # Redis数据库配置参数（docker-compose 实际映射为宿主机 6379）
+    REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+    REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+    REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+    REDIS_URL = os.getenv("REDIS_URL", f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}")
+    # 会话/任务在 Redis 中的过期时间（秒），可用 /session/ttl 接口动态调整
+    SESSION_TIMEOUT = int(os.getenv("SESSION_TIMEOUT", "300"))
+    TTL = int(os.getenv("SESSION_TTL", "3600"))
+    TASK_TTL = int(os.getenv("TASK_TTL", "3600"))
+
+    # Celery：broker 与 result backend 都走 Redis，可用环境变量覆盖
+    CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", REDIS_URL)
+    CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", REDIS_URL)
 
     # openai:调用gpt模型,qwen:调用阿里通义千问大模型,deepseek:调用deepseek大模型
     # 默认 qwen；可用环境变量 LLM_TYPE 覆盖

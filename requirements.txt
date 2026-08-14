@@ -11,4 +11,12 @@ pygraphviz>=1.11
 grandalf>=0.8
 # 长短期记忆：Postgres + pgvector 语义检索 + thread 级 checkpointer
 psycopg[binary]>=3.1
+psycopg_pool>=3.1
 langgraph-checkpoint-postgres>=3.0
+# Web 服务化：Redis 会话状态 + Celery 异步任务 + FastAPI + Gradio 前端
+celery>=5.3
+redis>=4.5
+fastapi>=0.100
+uvicorn>=0.23
+gradio>=4.0
+requests>=2.31
