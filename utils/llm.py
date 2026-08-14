@@ -4,6 +4,7 @@ import logging
 import sys
 from langchain_openai import ChatOpenAI
 from langchain_community.embeddings import HuggingFaceBgeEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 # 将项目根目录加入 sys.path，保证包内引用可用（以便从项目根运行脚本）
 CURRENT_DIR = os.path.dirname(__file__)
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, os.pardir)) # 调试断点，检查路径设置是否正确
@@ -53,6 +54,19 @@ class LLMInitializationError(Exception):
     pass
 
 
+def get_embedding_model() -> HuggingFaceEmbeddings:
+    """返回固定的 bge 中文 embedding 模型（768 维，CPU，归一化）。
+
+    长期记忆的语义检索等场景复用同一个模型，避免重复初始化。
+    """
+    model_name = r"C:\Users\qian gao\models\BAAI\bge-base-zh-v1___5"
+    model_kwargs = {"device": "cpu"}
+    encode_kwargs = {"normalize_embeddings": True}
+    return HuggingFaceEmbeddings(
+        model_name=model_name, model_kwargs=model_kwargs, encode_kwargs=encode_kwargs
+    )
+
+
 def initialize_llm(llm_type: str = DEFAULT_LLM_TYPE) -> tuple[ChatOpenAI, HuggingFaceBgeEmbeddings]:
     """
     初始化LLM实例
@@ -87,13 +101,8 @@ def initialize_llm(llm_type: str = DEFAULT_LLM_TYPE) -> tuple[ChatOpenAI, Huggin
             max_retries=2  # 添加重试次数
         )
         
-        # 默认为768维的向量，使用 HuggingFaceBgeEmbeddings 进行嵌入生成
-        model_name = r"C:\Users\qian gao\models\BAAI\bge-base-zh-v1___5"
-        model_kwargs = {"device": "cpu"}
-        encode_kwargs = {"normalize_embeddings": True}
-        llm_embedding = HuggingFaceBgeEmbeddings(
-            model_name=model_name, model_kwargs=model_kwargs, encode_kwargs=encode_kwargs
-        )
+        # 默认为768维的向量，复用固定的 bge 中文 embedding 模型
+        llm_embedding = get_embedding_model()
         logger.info(f"成功初始化 {llm_type} LLM")
         # return llm_chat
         return llm_chat, llm_embedding

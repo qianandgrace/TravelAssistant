@@ -9,3 +9,6 @@ python-dotenv>=1.0
 # 运行 `python main.py` 时保存 workflow 图快照（graph/*.png / *.txt）
 pygraphviz>=1.11
 grandalf>=0.8
+# 长短期记忆：Postgres + pgvector 语义检索 + thread 级 checkpointer
+psycopg[binary]>=3.1
+langgraph-checkpoint-postgres>=3.0
