@@ -16,8 +16,9 @@ import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
+from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 
 from utils import auth
 from utils.config import Config
@@ -35,6 +36,7 @@ from utils.models import (
     TaskInfoResponse,
     TtlRequest,
 )
+from utils.render_html import export_filename, render_itinerary_export_html
 from utils.session_manager import get_session_manager
 from utils.tasks import invoke_agent_task, resume_agent_task
 
@@ -193,6 +195,34 @@ async def get_agent_status(user_id: str, session_id: str, task_id: str):
         last_updated=session.get("last_updated"),
         last_response=session.get("last_response"),
     )
+
+
+# ---------- HTML 导出（Phase 8）----------
+@app.get("/agent/export/{user_id}/{session_id}/{task_id}")
+async def export_agent_html(user_id: str, session_id: str, task_id: str):
+    """导出已完成行程为独立 HTML 文件（附件下载）。
+
+    由服务端用 render_html 纯函数渲染，导出文件只含业务字段，
+    不含任何服务端 API Key（高德/LLM 等）。
+    """
+    sm = app.state.session_manager
+    if not await sm.session_task_id_exists(user_id, session_id, task_id):
+        raise HTTPException(status_code=404, detail="任务不存在")
+    session = await sm.get_session_by_task(user_id, session_id, task_id)
+    if (session or {}).get("status") != "completed":
+        raise HTTPException(status_code=400, detail="行程尚未完成，请先完成审阅后再导出")
+    result = ((session or {}).get("last_response") or {}).get("result") or {}
+    data = result.get("itinerary_data") or {}
+    if not (data.get("days") or []):
+        raise HTTPException(status_code=400, detail="当前任务没有可导出的行程数据")
+    html = render_itinerary_export_html(result)
+    filename = export_filename(result.get("destination"))
+    headers = {
+        "Content-Disposition": (
+            f"attachment; filename*=UTF-8''{quote(filename)}; filename=\"itinerary.html\""
+        )
+    }
+    return Response(content=html, media_type="text/html; charset=utf-8", headers=headers)
 
 
 # ---------- 长期记忆 / 会话管理 ----------

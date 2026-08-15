@@ -16,5 +16,8 @@ logfile/
 # 每次运行生成的 graph 快照
 graph/
 
+# HTML 导出目录
+exports/
+
 # env 文件
 .env

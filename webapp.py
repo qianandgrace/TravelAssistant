@@ -8,13 +8,56 @@
 """
 import json
 import os
+import re
 import time
 import uuid
+from urllib.parse import unquote
 
 import gradio as gr
 import requests
 
+from utils.render_html import (
+    render_itinerary_product_html,
+    render_rec_cards_html,
+)
+
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8001")
+
+# 导出 HTML 落地目录（后端生成，前端写盘后交给浏览器下载）
+EXPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "exports")
+os.makedirs(EXPORT_DIR, exist_ok=True)
+
+# 意图 -> 中文标签（与 utils/intent_router.py 的 INTENTS 对应）
+INTENT_LABELS = {
+    "TRAVEL_PLANNING": "规划行程",
+    "DESTINATION_RECOMMENDATION": "推荐目的地",
+    "TRAVEL_QA": "旅游问答",
+    "ITINERARY_MODIFICATION": "修改行程",
+    "NON_TRAVEL": "非旅游",
+}
+
+# 目的地推荐：最多 6 个卡片按钮
+REC_BTN_COUNT = 6
+REC_BTN_PREFIX = "选择这个目的地："
+
+
+def _rec_pass():
+    """refresh 对推荐区/产品视图不做修改时的 9 个占位输出
+    （rec_view, rec_html, 6 按钮, product_view）。"""
+    return (gr.update(), gr.update(), *(gr.update() for _ in range(REC_BTN_COUNT)), gr.update())
+
+
+def _rec_show(recs):
+    """completed 且带 recommendations 时，返回 9 个更新（推荐区显示、产品视图隐藏）。"""
+    html = render_rec_cards_html(recs)
+    btn_updates = []
+    for i in range(REC_BTN_COUNT):
+        if i < len(recs):
+            dest = recs[i].get("destination", "")
+            btn_updates.append(gr.update(value=f"{REC_BTN_PREFIX}{dest}", visible=True))
+        else:
+            btn_updates.append(gr.update(visible=False))
+    return (gr.update(visible=True), gr.update(value=html), *btn_updates, gr.update(visible=False))
 
 # ---------- 后端 API 封装 ----------
 def _req(method, path, **kw):
@@ -74,6 +117,45 @@ def _detail(exc):
         return exc.response.json().get("detail") or str(exc)
     except Exception:  # noqa: BLE001
         return str(exc)
+
+
+def _disposition_name(dispo):
+    """从 Content-Disposition 解析导出文件名（优先 UTF-8 的 filename*）。"""
+    m = re.search(r"filename\*=UTF-8''([^;]+)", dispo or "")
+    if m:
+        return unquote(m.group(1))
+    m = re.search(r'filename="([^"]+)"', dispo or "")
+    return m.group(1) if m else "itinerary.html"
+
+
+def do_export(ui):
+    """导出当前已完成行程为独立 HTML 文件，返回 (状态信息, 文件路径)。
+
+    文件路径非 None 时 DownloadButton 触发浏览器下载；None 时只提示不下载。
+    """
+    uid, sid, tid = ui.get("user_id"), ui.get("session_id"), ui.get("task_id")
+    if not (uid and sid and tid):
+        return "请先登录并完成一次行程规划。", None
+    try:
+        r = requests.get(f"{API_BASE_URL}/agent/export/{uid}/{sid}/{tid}", timeout=30)
+    except requests.HTTPError as e:
+        return f"导出失败：{_detail(e)}", None
+    except Exception as e:  # noqa: BLE001
+        return f"导出失败：{e}", None
+    if r.status_code != 200:
+        try:
+            msg = r.json().get("detail") or r.text
+        except Exception:  # noqa: BLE001
+            msg = r.text
+        return f"导出失败：{msg}", None
+    name = _disposition_name(r.headers.get("Content-Disposition"))
+    path = os.path.join(EXPORT_DIR, name)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(r.text)
+    except Exception as e:  # noqa: BLE001
+        return f"导出文件写入失败：{e}", None
+    return f"已生成导出文件：{name}", path
 
 
 def api_delete_session(uid, sid):
@@ -167,53 +249,95 @@ def do_logout(ui, chatbot):
 def send(query, ui, chatbot):
     uid = ui.get("user_id")
     if not uid:
-        return "请先登录。", ui, chatbot, ""
+        return "请先登录。", ui, chatbot, "", gr.update(visible=False), gr.update(visible=False)
     query = (query or "").strip()
     if not query:
-        return "请输入内容。", ui, chatbot, ""
+        return "请输入内容。", ui, chatbot, "", gr.update(visible=False), gr.update(visible=False)
     sid, tid = ui.get("session_id"), ui.get("task_id")
     if sid and tid:
         try:
             if api_status(uid, sid, tid).get("status") == "interrupted":
-                return "当前会话有未处理的裁决，请先在下方处理，再发起新请求。", ui, chatbot, ""
+                return "当前会话有未处理的裁决，请先在下方处理，再发起新请求。", ui, chatbot, "", gr.update(visible=False), gr.update(visible=False)
         except Exception:
             pass
     try:
         r = api_invoke(uid, sid, query)
     except Exception as e:
-        return f"提交失败：{e}", ui, chatbot, ""
+        return f"提交失败：{e}", ui, chatbot, "", gr.update(visible=False), gr.update(visible=False)
     ui["session_id"] = r["session_id"]
     ui["task_id"] = r["task_id"]
     ui["shown_interrupt"] = ""
+    ui["last_shown_task"] = ""
     chatbot = list(chatbot or []) + [{"role": "user", "content": query}]
     return (f"已提交，task_id={r['task_id'][:8]}…\n随时点击「刷新状态」查看进度。",
-            ui, chatbot, "")
+            ui, chatbot, "", gr.update(visible=False), gr.update(visible=False))
+
+
+def plan_destination(ui, chatbot, destination):
+    """「选择这个目的地」按钮：点卡片即自动进入该地行程规划。"""
+    uid = ui.get("user_id")
+    if not uid:
+        return "请先登录。", ui, chatbot, gr.update(visible=False), gr.update(visible=False)
+    dest = (destination or "").strip()
+    if dest.startswith(REC_BTN_PREFIX):
+        dest = dest[len(REC_BTN_PREFIX):].strip()
+    if not dest:
+        return "未选择目的地。", ui, chatbot, gr.update(visible=False), gr.update(visible=False)
+    days = (ui.get("rec_dests") or {}).get(dest)
+    query = f"去{dest}，约{days}天" if days else f"帮我规划{dest}的行程"
+    sid, tid = ui.get("session_id"), ui.get("task_id")
+    if sid and tid:
+        try:
+            if api_status(uid, sid, tid).get("status") == "interrupted":
+                return "当前会话有未处理的裁决，请先在下方处理，再开始新规划。", ui, chatbot, gr.update(visible=False), gr.update(visible=False)
+        except Exception:
+            pass
+    try:
+        r = api_invoke(uid, sid, query)
+    except Exception as e:
+        return f"提交失败：{e}", ui, chatbot, gr.update(visible=False), gr.update(visible=False)
+    ui["session_id"] = r["session_id"]
+    ui["task_id"] = r["task_id"]
+    ui["shown_interrupt"] = ""
+    ui["last_shown_task"] = ""
+    chatbot = list(chatbot or []) + [{"role": "user", "content": query}]
+    return f"已提交：{query}\n随时点击「刷新状态」查看进度。", ui, chatbot, gr.update(visible=False), gr.update(visible=False)
 
 
 def refresh(ui, chatbot, interrupt_md, action_radio):
     uid, sid, tid = ui.get("user_id"), ui.get("session_id"), ui.get("task_id")
+    rec_pass = _rec_pass()
     if not (uid and sid and tid):
-        return "请先登录并发起一次任务。", ui, chatbot, interrupt_md, gr.update(choices=[], value=None)
+        return "请先登录并发起一次任务。", ui, chatbot, interrupt_md, gr.update(choices=[], value=None), *rec_pass
     try:
         st = api_status(uid, sid, tid)
     except Exception as e:
-        return f"查询失败：{e}", ui, chatbot, interrupt_md, action_radio
+        return f"查询失败：{e}", ui, chatbot, interrupt_md, action_radio, *rec_pass
     status, resp = st.get("status"), st.get("last_response") or {}
 
     if status in ("pending", "running"):
         parsed = resp.get("parsed") or {}
         if parsed:
-            msg = (f"任务运行中… 已识别：目的地={parsed.get('destination')}　"
+            intent = parsed.get("intent") or ""
+            tag = f"意图={INTENT_LABELS.get(intent, intent)}　" if intent else ""
+            msg = (f"任务运行中… {tag}已识别：目的地={parsed.get('destination')}　"
                    f"{parsed.get('days')}天　偏好={parsed.get('preference') or '无'}\n"
                    f"（{parsed.get('start_date')} ~ {parsed.get('end_date')}）")
         else:
             msg = "任务运行中，请稍候刷新…"
-        return msg, ui, chatbot, interrupt_md, gr.update(choices=[], value=None)
+        return msg, ui, chatbot, interrupt_md, gr.update(choices=[], value=None), *rec_pass
 
     if status == "interrupted":
         idata = resp.get("interrupt_data") or {}
         kind = idata.get("kind")
+        sig = _interrupt_signature(idata)
+        re_render = ui.get("shown_interrupt") != sig
+        prod = gr.update()  # 默认不动产品视图（confirm_memory 阶段保留已审阅的行程）
         if kind == "review_itinerary":
+            # 审阅时用 partial 里的结构化数据渲染产品视图（卡片 + 地图）
+            partial = resp.get("partial") or {}
+            if re_render and partial.get("itinerary_data"):
+                prod = gr.update(value=render_itinerary_product_html(partial), visible=True)
             md = f"**请审阅以下生成的行程**\n\n{idata.get('itinerary', '')}"
             choices = ["接受", "编辑", "拒绝"]
         elif kind == "confirm_memory":
@@ -224,31 +348,63 @@ def refresh(ui, chatbot, interrupt_md, action_radio):
         else:
             md = f"中断数据：{idata}"
             choices = []
-        sig = _interrupt_signature(idata)
-        if ui.get("shown_interrupt") == sig:
-            # 同一中断已渲染，直接透传，不清掉用户正在做的选择
-            return "会话中断，请在下方做出选择。", ui, chatbot, interrupt_md, action_radio
-        ui["shown_interrupt"] = sig
-        return "会话中断，请在下方做出选择。", ui, chatbot, md, gr.update(choices=choices, value=None)
+        rec_out = (gr.update(visible=False), gr.update(),
+                   *(gr.update() for _ in range(REC_BTN_COUNT)), prod)
+        if re_render:
+            ui["shown_interrupt"] = sig
+            return "会话中断，请在下方做出选择。", ui, chatbot, md, gr.update(choices=choices, value=None), *rec_out
+        # 同一中断已渲染，直接透传，不清掉用户正在做的选择
+        return "会话中断，请在下方做出选择。", ui, chatbot, interrupt_md, action_radio, *rec_out
 
     if status == "completed":
         result = resp.get("result") or {}
-        itinerary = result.get("itinerary")
-        if ui.get("last_shown_task") != tid and itinerary:
-            chatbot = list(chatbot or []) + [
-                {"role": "assistant", "content": f"**行程规划完成**\n\n{itinerary}"}
-            ]
+        if ui.get("last_shown_task") != tid:
+            itinerary = result.get("itinerary")
+            if itinerary:
+                chatbot = list(chatbot or []) + [
+                    {"role": "assistant", "content": f"**行程规划完成**\n\n{itinerary}"}
+                ]
+            reply = result.get("reply")
+            if reply:
+                # 问答 / 目的地推荐 / 非旅游拒绝：直接展示 LLM 回答
+                chatbot = list(chatbot or []) + [{"role": "assistant", "content": reply}]
             ui["last_shown_task"] = tid
+        recs = result.get("recommendations") or []
+        data = result.get("itinerary_data")
+        if data:
+            if ui.get("prod_task") == tid:
+                prod = gr.update()  # 本任务产品视图已渲染，避免 3s 定时器反复重建 DOM
+            else:
+                ui["prod_task"] = tid
+                prod = gr.update(value=render_itinerary_product_html(result), visible=True)
+        else:
+            prod = gr.update(visible=False)
+        if recs:
+            ui["rec_dests"] = {r.get("destination", ""): r.get("recommended_days", 3) for r in recs}
+            rec_out = _rec_show(recs)
+        elif data:
+            rec_out = (gr.update(visible=False), gr.update(),
+                       *(gr.update(visible=False) for _ in range(REC_BTN_COUNT)), prod)
+        else:
+            rec_out = (gr.update(visible=False), gr.update(),
+                       *(gr.update() for _ in range(REC_BTN_COUNT)), prod)
         parsed = result.get("parsed") or {}
         ent = (f"已识别：目的地={parsed.get('destination')}　{parsed.get('days')}天　"
-               f"偏好={parsed.get('preference') or '无'}") if parsed else ""
+               f"偏好={parsed.get('preference') or '无'}") if parsed.get("destination") else ""
         mem = f"　{result.get('memory_saved')}" if result.get("memory_saved") else ""
-        return f"任务完成。{ent}{mem}", ui, chatbot, "", gr.update(choices=[], value=None)
+        research = result.get("research") or {}
+        srcs = research.get("sources") or []
+        src_txt = f"　参考攻略来源：{len(srcs)}" if srcs else ""
+        intent = parsed.get("intent") or result.get("intent") or ""
+        tag = f"意图={INTENT_LABELS.get(intent, intent)}" if intent else ""
+        parts = [p for p in ("任务完成。", tag, ent, mem, src_txt) if p]
+        msg = "　".join(parts).replace("　　", "　") or "任务完成。"
+        return msg, ui, chatbot, "", gr.update(choices=[], value=None), *rec_out
 
     if status == "error":
-        return f"任务出错：{resp.get('message', '未知错误')}", ui, chatbot, "", gr.update(choices=[], value=None)
+        return f"任务出错：{resp.get('message', '未知错误')}", ui, chatbot, "", gr.update(choices=[], value=None), *rec_pass
 
-    return f"当前状态：{status}", ui, chatbot, interrupt_md, action_radio
+    return f"当前状态：{status}", ui, chatbot, interrupt_md, action_radio, *rec_pass
 
 
 def resolve(ui, action, text):
@@ -344,6 +500,7 @@ with gr.Blocks(title="旅游行程规划 Agent") as demo:
             with gr.Row():
                 logout_btn = gr.Button("退出登录")
                 refresh_btn = gr.Button("刷新状态")
+                export_btn = gr.DownloadButton("导出 HTML", variant="secondary")
 
         status_md = gr.Markdown("### 请先登录")
 
@@ -355,6 +512,16 @@ with gr.Blocks(title="旅游行程规划 Agent") as demo:
             lines=2,
         )
         send_btn = gr.Button("发送", variant="primary")
+
+        # 行程产品视图（时间线卡片 + 地图，Phase 7）
+        product_view = gr.HTML("", visible=False)
+
+        # 目的地推荐区（点击卡片按钮自动进入规划）
+        with gr.Group(visible=False) as rec_view:
+            rec_html = gr.HTML("")
+            with gr.Row():
+                rec_buttons = [gr.Button("", variant="secondary") for _ in range(REC_BTN_COUNT)]
+            gr.Markdown("点击上方任意目的地按钮，自动开始规划该地行程。")
 
         interrupt_md = gr.Markdown("")
         with gr.Row():
@@ -385,18 +552,23 @@ with gr.Blocks(title="旅游行程规划 Agent") as demo:
                       session_dropdown, login_pwd, reg_pwd])
 
     # ---- 对话 ----
-    send_btn.click(send, [query_box, ui, chatbot], [status_md, ui, chatbot, query_box])
-    refresh_btn.click(refresh, [ui, chatbot, interrupt_md, action_radio],
-                      [status_md, ui, chatbot, interrupt_md, action_radio])
+    rec_outputs = [status_md, ui, chatbot, interrupt_md, action_radio,
+                   rec_view, rec_html, *rec_buttons, product_view]
+    send_btn.click(send, [query_box, ui, chatbot],
+                   [status_md, ui, chatbot, query_box, rec_view, product_view])
+    refresh_btn.click(refresh, [ui, chatbot, interrupt_md, action_radio], rec_outputs)
+    export_btn.click(do_export, [ui], [status_md, export_btn])
     resolve_btn.click(resolve, [ui, action_radio, action_text],
                       [status_md, ui, action_radio, action_text])
     switch_btn.click(switch_session, [ui, session_dropdown], [status_md, ui, session_dropdown])
     del_session_btn.click(delete_session, [ui, session_dropdown], [status_md, ui, session_dropdown])
     ttl_btn.click(set_ttl, [ui, ttl_box], [status_md])
     note_btn.click(write_note, [ui, note_box], [status_md, note_box])
+    for _btn in rec_buttons:
+        _btn.click(plan_destination, [ui, chatbot, _btn],
+                   [status_md, ui, chatbot, rec_view, product_view])
 
-    gr.Timer(3).tick(refresh, [ui, chatbot, interrupt_md, action_radio],
-                     [status_md, ui, chatbot, interrupt_md, action_radio])
+    gr.Timer(3).tick(refresh, [ui, chatbot, interrupt_md, action_radio], rec_outputs)
 
 
 if __name__ == "__main__":
