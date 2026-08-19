@@ -44,15 +44,17 @@ from utils.tasks import invoke_agent_task, resume_agent_task
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(Config.LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
+# 日志级别：LOG_LEVEL 环境变量（默认 DEBUG）。llm.py 的 basicConfig 可能已先配置根
+# logger（第一次生效），因此这里不用 basicConfig，而是显式设级别 + 追加文件 handler。
+_level = getattr(logging, Config.LOG_LEVEL, logging.DEBUG)
+logging.getLogger().setLevel(_level)
+_has_file = any(getattr(h, "baseFilename", None) == str(Config.LOG_FILE) for h in logging.getLogger().handlers)
+if not _has_file:
+    _fh = logging.FileHandler(Config.LOG_FILE, encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    logging.getLogger().addHandler(_fh)
 logger = logging.getLogger("server")
+logger.debug("server 日志已配置：级别=%s，文件=%s", Config.LOG_LEVEL, Config.LOG_FILE)
 
 
 @asynccontextmanager

@@ -232,13 +232,17 @@ def create_nodes(map_tools):
         if not results:
             raise ValueError(f"高德无法解析目的地：{state['destination']}")
         first = results[0]
+        logger.debug("[geocode] 目的地=%s -> location=%s adcode=%s",
+                     state["destination"], first["location"], first.get("adcode", ""))
         return {"location": first["location"], "adcode": first.get("adcode", "")}
 
     async def get_weather(state: TravelState) -> dict:
         """天气是锦上添花的上下文：失败返回空，绝不阻断规划。"""
         try:
             res = await weather_tool.ainvoke({"city": state["destination"]})
-            return {"weather": _format_weather(_parse_json(res))}
+            weather = _format_weather(_parse_json(res))
+            logger.debug("[get_weather] %s -> %s", state["destination"], weather or "（无天气数据）")
+            return {"weather": weather}
         except Exception as e:  # noqa: BLE001 - 天气失败降级为空
             logger.warning("天气获取失败（降级为空）：%s", e)
             return {"weather": ""}
@@ -267,6 +271,8 @@ def create_nodes(map_tools):
         except Exception as e:  # noqa: BLE001 - POI 失败降级为空
             logger.warning("POI 搜索失败（降级为空）：%s", e)
             pois = []
+        logger.debug("[search_pois] %s 共获取 %d 个 POI（按分类：%s）",
+                     location, len(pois), {c: sum(1 for p in pois if p["category"] == c) for c in POI_CATEGORIES})
         return {"pois": pois}
 
     async def do_research(state: TravelState) -> dict:
@@ -280,8 +286,11 @@ def create_nodes(map_tools):
         days = state.get("days", 0)
         try:
             sr = await search_guides(dest, pref, days)
+            logger.debug("[do_research] 搜索到 %d 个攻略/游记来源", len(sr["sources"]))
             summary = await research_summary(dest, pref, days, sr["sources"])
             summary["search_available"] = sr["search_available"]
+            logger.debug("[do_research] 研究摘要已生成（%s 字）",
+                         len(str(summary.get("research_text", ""))))
             return {"research": summary}
         except Exception as e:  # noqa: BLE001 - 研究失败降级为空
             logger.warning("研究摘要失败（降级为空）：%s", e)
@@ -310,7 +319,11 @@ def create_nodes(map_tools):
         text = str(res.content)
         data, err = _try_parse_validate(text, state)
         if data is not None:
+            logger.debug("[plan_itinerary] JSON 一次通过：%d 天行程，%d 个 item",
+                         len(data.get("days", [])),
+                         sum(len(d.get("items", [])) for d in data.get("days", [])))
             return data
+        logger.debug("[plan_itinerary] JSON 校验失败（%s），尝试修复一次", err)
         # 修复一次：带原文 + 错误让 LLM 重新输出
         repair_prompt = ITINERARY_REPAIR_PROMPT.format(
             days=state["days"], invalid=text, error=err or "结构不符合要求",
@@ -318,6 +331,8 @@ def create_nodes(map_tools):
         res2 = await acall_with_fallback([HumanMessage(content=repair_prompt)])
         data2, err2 = _try_parse_validate(str(res2.content), state)
         if data2 is not None:
+            logger.debug("[plan_itinerary] 修复后 JSON 通过：%d 天行程",
+                         len(data2.get("days", [])))
             return data2
         logger.error("行程 JSON 两次失败，回退文本版：%s | %s", err, err2)
         return None
@@ -516,6 +531,7 @@ def build_workflow(map_tools, memory=None):
             try:
                 parts = [dest, pref, "旅游 景点 美食 酒店"]
                 text = await memory.retrieve(query=" ".join(p for p in parts if p))
+                logger.debug("[retrieve_memory] 检索到 %d 条相关长期记忆", len(text.splitlines()) if text else 0)
             except Exception as e:  # noqa: BLE001 - 记忆检索失败降级为空
                 logger.warning("长期记忆检索失败（降级为空）：%s", e)
                 text = ""
@@ -524,6 +540,7 @@ def build_workflow(map_tools, memory=None):
                 f"请规划{dest}的{state.get('days', 0)}天行程，偏好：{pref or '无'}"
             )
             msgs.append(HumanMessage(content=need))
+            logger.debug("[retrieve_memory] 追加用户请求到对话：%s", need[:60])
             return {"memories": text, "messages": msgs}
 
         async def summarize_conversation(state: TravelState) -> dict:
@@ -545,9 +562,12 @@ def build_workflow(map_tools, memory=None):
             if dropped:
                 try:
                     summary = await _summarize_history(summary, dropped)
+                    logger.debug("[summarize] 裁掉 %d 条旧消息并入累计摘要", summarized)
                 except Exception as e:  # noqa: BLE001 - 摘要失败则不压缩，保留上下文
                     logger.warning("对话摘要失败，本轮不压缩：%s", e)
                     recent, summarized = messages, 0
+            else:
+                logger.debug("[summarize] 对话未超长，无需压缩（当前 %d 条消息）", len(messages))
             return {
                 "messages": recent,
                 "summary": summary,
@@ -556,6 +576,7 @@ def build_workflow(map_tools, memory=None):
 
         async def review_itinerary(state: TravelState) -> dict:
             """HITL：interrupt 让用户接受 / 编辑 / 拒绝生成的行程。"""
+            logger.debug("[review_itinerary] 行程已生成，中断等待用户裁决（接受/编辑/拒绝）")
             decision = interrupt(
                 {"kind": "review_itinerary", "itinerary": state.get("itinerary", "")}
             )
@@ -564,6 +585,7 @@ def build_workflow(map_tools, memory=None):
             msgs = list(state.get("messages") or [])
             if action == "edit":
                 edited = str(decision.get("text") or "").strip() or itinerary
+                logger.debug("[review_itinerary] 用户选择「编辑」行程：%s", edited[:40])
                 msgs.append(AIMessage(content=edited))
                 return {
                     "itinerary": edited,
@@ -573,10 +595,12 @@ def build_workflow(map_tools, memory=None):
                 }
             if action == "reject":
                 fb = str(decision.get("text") or "").strip()
+                logger.debug("[review_itinerary] 用户选择「拒绝」，意见：%s", fb[:40] or "（无）")
                 if fb:
                     msgs.append(HumanMessage(content=f"对行程不满意，修改意见：{fb}"))
                 return {"user_action": "reject", "feedback": fb, "messages": msgs}
             # accept：沿用当前 itinerary
+            logger.debug("[review_itinerary] 用户选择「接受」行程，进入记忆确认")
             msgs.append(AIMessage(content=itinerary))
             return {"user_action": "accept", "feedback": "", "messages": msgs}
 
@@ -584,14 +608,17 @@ def build_workflow(map_tools, memory=None):
             """LLM 提炼通用旅游知识（独立节点，避免 interrupt 重跑重复耗 LLM）。"""
             dest = state.get("destination", "")
             knowledge = await _extract_knowledge(dest, state.get("itinerary", ""))
+            logger.debug("[extract_memory] 提炼 %d 条通用旅游知识", len(knowledge or []))
             return {"knowledge": knowledge}
 
         async def save_memory(state: TravelState) -> dict:
             """HITL 确认后落库 episodic/semantic（best-effort，失败不阻断本次行程）。"""
+            logger.debug("[save_memory] 中断等待用户确认是否保存记忆")
             decision = interrupt(
                 {"kind": "confirm_memory", "knowledge": state.get("knowledge") or []}
             )
             if not (isinstance(decision, dict) and decision.get("action") == "save"):
+                logger.debug("[save_memory] 用户放弃保存记忆")
                 return {"memory_saved": "用户放弃保存记忆"}
             status = "记忆保存失败"
             try:
@@ -606,6 +633,7 @@ def build_workflow(map_tools, memory=None):
                 )
                 await memory.save_semantic(dest, state.get("knowledge") or [])
                 status = f"episodic+semantic 已保存（{len(state.get('knowledge') or [])} 条知识）"
+                logger.debug("[save_memory] 已保存到 Postgres store 表（prefix=memory.<user_id>）")
             except Exception as e:  # noqa: BLE001
                 logger.warning("保存记忆失败（不影响本次行程）：%s", e)
             return {"memory_saved": status}

@@ -56,9 +56,26 @@ _CSS = """
 .tp-tips{border:1px solid #fde68a;background:#fffbeb;border-radius:10px;padding:10px 14px;margin-top:6px}
 .tp-tips b{color:#92400e;font-size:13px}
 .tp-tips li{font-size:12.5px;color:#78350f;margin:2px 0}
-.tp-src{font-size:11.5px;color:#9ca3af;margin-top:8px}
+.tp-src{margin-top:8px}
+.tp-src details{border:1px solid #e5e7eb;border-radius:10px;background:#fff;padding:0}
+.tp-src summary{cursor:pointer;font-size:12.5px;color:#374151;padding:8px 12px;list-style:none;display:flex;align-items:center;gap:6px}
+.tp-src summary::-webkit-details-marker{display:none}
+.tp-src summary::before{content:"▸";transition:transform .15s;font-size:11px;color:#64748b}
+.tp-src details[open] summary::before{transform:rotate(90deg)}
+.tp-src ul{list-style:none;margin:0;padding:4px 12px 10px 26px}
+.tp-src li{margin:3px 0}
+.tp-src a{font-size:12.5px;color:#0369a1;text-decoration:none;word-break:break-all}
+.tp-src a:hover{text-decoration:underline}
+.tp-src .tp-src-num{font-size:12.5px;color:#64748b;font-weight:600}
 .tp-mapcard{border:1px solid #e5e7eb;border-radius:12px;padding:10px;background:#fff}
 .tp-mapcard h4{margin:0 0 6px;font-size:13px;color:#374151}
+.tp-mapzoom{position:relative}
+.tp-mapzoom-tools{position:absolute;top:8px;right:8px;z-index:5;display:flex;gap:4px}
+.tp-mapzoom-tools button{width:26px;height:26px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;color:#334155;font-size:14px;line-height:1;cursor:pointer;box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.tp-mapzoom-tools button:hover{background:#f1f5f9}
+.tp-mapviewport{overflow:hidden;position:relative;border-radius:10px;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
+.tp-mapviewport.grabbing{cursor:grabbing}
+.tp-mapviewport svg{display:block;width:100%;height:auto;transform-origin:0 0}
 .tp-rec-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
 .tp-rec-card{border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;background:#fff}
 .tp-rec-card img{width:100%;height:130px;object-fit:cover;display:block;background:#f1f5f9}
@@ -72,6 +89,47 @@ _CSS = """
 
 def _esc(v) -> str:
     return html.escape(str(v or ""), quote=True)
+
+
+# 地图缩放平移 JS：滚轮缩放（以光标为中心）、拖拽平移、＋/−/复位按钮。
+# 作用域限定在 .tp-mapviewport 内；dataset.zoomReady 防止重复绑定。
+_MAP_ZOOM_JS = """<script>
+(function(){
+  var vp=document.querySelector('.tp-mapviewport');
+  if(!vp||vp.dataset.zoomReady)return; vp.dataset.zoomReady='1';
+  var svg=vp.querySelector('svg'); if(!svg)return;
+  var scale=1,tx=0,ty=0,drag=null;
+  function apply(){ svg.style.transform='translate('+tx+'px,'+ty+'px) scale('+scale+')'; }
+  function clampDrag(){ /* 缩放为1时不允许拖出视野 */ }
+  function zoomAt(px,py,f){
+    var ns=Math.max(1,Math.min(6,scale*f));
+    var k=ns/scale;
+    tx=px-(px-tx)*k; ty=py-(py-ty)*k; scale=ns; apply();
+  }
+  var btns=vp.querySelectorAll('.tp-mapzoom-tools button');
+  for(var i=0;i<btns.length;i++){
+    btns[i].addEventListener('click',function(e){
+      e.stopPropagation();
+      var z=this.getAttribute('data-z');
+      var w=vp.clientWidth,h=vp.clientHeight;
+      if(z==='in')zoomAt(w/2,h/2,1.25);
+      else if(z==='out')zoomAt(w/2,h/2,0.8);
+      else{scale=1;tx=0;ty=0;apply();}
+    });
+  }
+  vp.addEventListener('wheel',function(e){
+    e.preventDefault();
+    var r=vp.getBoundingClientRect();
+    zoomAt(e.clientX-r.left,e.clientY-r.top, e.deltaY<0?1.15:0.87);
+  },{passive:false});
+  vp.addEventListener('mousedown',function(e){ if(e.button!==0)return; drag={x:e.clientX-tx,y:e.clientY-ty}; vp.classList.add('grabbing'); });
+  window.addEventListener('mousemove',function(e){ if(!drag)return; tx=e.clientX-drag.x; ty=e.clientY-drag.y; apply(); });
+  window.addEventListener('mouseup',function(){ drag=null; vp.classList.remove('grabbing'); });
+  vp.addEventListener('touchstart',function(e){ var t=e.touches[0]; drag={x:t.clientX-tx,y:t.clientY-ty}; vp.classList.add('grabbing'); },{passive:true});
+  vp.addEventListener('touchmove',function(e){ if(!drag||e.touches.length!==1)return; var t=e.touches[0]; tx=t.clientX-drag.x; ty=t.clientY-drag.y; apply(); e.preventDefault(); },{passive:false});
+  vp.addEventListener('touchend',function(){ drag=null; vp.classList.remove('grabbing'); });
+})();
+</script>"""
 
 
 def _km_width(lng_span: float, lat_mid: float) -> float:
@@ -181,7 +239,18 @@ def render_svg_map(days: list, width: int = 560, height: int = 440) -> str:
         )
         parts.append(f"<text x='{cx + 11}' y='{ly + 3}' font-size='9' fill='#475569'>D{di + 1}</text>")
     parts.append("</svg>")
-    return "".join(parts)
+    svg = "".join(parts)
+    return (
+        "<div class='tp-mapzoom'>"
+        "<div class='tp-mapzoom-tools'>"
+        "<button type='button' data-z='in' title='放大'>＋</button>"
+        "<button type='button' data-z='out' title='缩小'>－</button>"
+        "<button type='button' data-z='reset' title='复位'>⟲</button>"
+        "</div>"
+        f"<div class='tp-mapviewport'>{svg}</div>"
+        "</div>"
+        + _MAP_ZOOM_JS
+    )
 
 
 def _render_day_card(day: dict, item_start: int) -> str:
@@ -290,7 +359,24 @@ def render_itinerary_product_html(result: dict) -> str:
         tips_html = "<div class='tp-tips'><b>小贴士</b><ul>" + "".join(
             f"<li>{_esc(t)}</li>" for t in tips
         ) + "</ul></div>"
-    src_html = f"<div class='tp-src'>参考了 {len(sources)} 个攻略/游记来源</div>" if sources else ""
+    # 攻略/游记来源：可展开下拉，逐条给出可点击链接（真实来源，绝不编造）
+    if sources:
+        items_html = "".join(
+            f"<li><a href='{_esc(s.get('url', ''))}' target='_blank' rel='noopener'>"
+            f"{_esc(s.get('title') or s.get('url') or '（未命名来源）')}</a></li>"
+            for s in sources if s.get("url") or s.get("title")
+        )
+        if items_html:
+            src_html = (
+                "<div class='tp-src'><details><summary>"
+                "<span class='tp-src-num'>参考了 " + str(len(sources)) + " 个攻略/游记来源</span>"
+                "<span style='color:#9ca3af;font-size:11px'>（点击展开查看链接）</span>"
+                "</summary><ul>" + items_html + "</ul></details></div>"
+            )
+        else:
+            src_html = ""
+    else:
+        src_html = ""
 
     timeline = (
         f"<div class='tp-col-main'>{day_html}{tips_html}{src_html}</div>"

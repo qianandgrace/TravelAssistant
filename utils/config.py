@@ -15,6 +15,8 @@ class Config:
         os.makedirs(os.path.dirname(LOG_FILE))
     MAX_BYTES = 5 * 1024 * 1024
     BACKUP_COUNT = 3
+    # 日志级别（DEBUG/INFO/WARNING/ERROR），默认 DEBUG 便于观察各流程节点
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG").upper()
 
     # PostgreSQL数据库配置参数
     DB_URI = os.getenv("DB_URI", "postgresql://gq210:123456@localhost:5433/postgres?sslmode=disable")
@@ -41,6 +43,10 @@ class Config:
 
     # LLM 回退链：某一家无 key / 调用失败时依次切换下一家
     LLM_FALLBACK_CHAIN = ["qwen", "deepseek", "openai"]
+
+    # LLM 单次调用超时（秒）。规划等大输出场景 qwen-max 生成 3~4k token 需要几十秒，
+    # 30s 的默认超时会导致 planner 必然超时（ReadTimeout）+ 90s 空等后才回退到下一家。
+    LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "120"))
 
 
     # API服务地址和端口

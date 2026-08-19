@@ -18,6 +18,27 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DAYS = 3
 
+# 中文数字 -> 阿拉伯数字（用于从原文补抽「四天」这类天数）
+_CN_NUM = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+           "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+
+
+def _days_from_query(query: str) -> Optional[int]:
+    """从原文补抽天数，如「4天」「约5天」「五天」「玩一天」。
+
+    只在 LLM 没给可解析 days 时兜底用；排除「有一天」（someday）这类非数量表达。
+    """
+    if not query:
+        return None
+    text = query.replace("有一天", "")
+    m = re.search(r"(\d{1,2}|[一二两三四五六七八九十]+)\s*天", text)
+    if not m:
+        return None
+    g = m.group(1)
+    if g.isdigit():
+        return int(g)
+    return _CN_NUM.get(g)
+
 
 def _strip_json_fence(text: str) -> str:
     """去掉 ```json ... ``` 等围栏，取第一个花括号对象。"""
@@ -53,11 +74,17 @@ def _parse_date(s) -> Optional[date]:
 
 
 def _as_int(value, default: int = DEFAULT_DAYS) -> int:
-    try:
-        n = int(value)
-        return n if n > 0 else default
-    except (TypeError, ValueError):
+    """把 '4' / '4天' / '约5天' / 3.0 解析为整数；解析失败返回 default。
+
+    LLM 常把天数写成带单位（"4天"）或带口语（"约5天"），只取其中的数字部分。
+    """
+    if value is None or isinstance(value, bool):
         return default
+    s = re.sub(r"[^0-9]", "", str(value))
+    if not s:
+        return default
+    n = int(s)
+    return n if n > 0 else default
 
 
 def _compute_days(start: Optional[date], end: Optional[date], raw_days) -> int:
@@ -87,6 +114,12 @@ async def extract_travel_entities(query: str) -> dict:
     start = _parse_date(data.get("start_date"))
     end = _parse_date(data.get("end_date"))
     days = _compute_days(start, end, data.get("days"))
+    # 兜底：LLM 漏了 days（如裸「杭州4天」只回 destination），且无日期区间可算天数时，
+    # 从原文补抽「4天/约5天/五天」，避免静默退化 DEFAULT_DAYS=3。
+    if days == DEFAULT_DAYS and not (start and end):
+        alt = _days_from_query(query)
+        if alt:
+            days = alt
     preference = str(data.get("preference") or "").strip()
 
     return {

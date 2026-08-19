@@ -15,9 +15,16 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 from utils.config import config
 
-# 设置日志模版
-logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# 单次调用超时（秒）。注意：initialize_llm/get_single_llm 内部有局部变量 config
+# 会遮蔽上面的模块级 config，因此这里先取成模块常量再使用。
+_LLM_TIMEOUT = config.LLM_TIMEOUT
+
+# 设置日志模版。首次 basicConfig 决定全应用根 logger 级别，
+# 因此这里读 LOG_LEVEL 环境变量（默认 DEBUG），让各流程节点的调试日志可见。
+_LEVEL = getattr(logging, str(os.getenv("LOG_LEVEL", "DEBUG")).upper(), logging.DEBUG)
+logging.basicConfig(level=_LEVEL, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+logger.debug("日志级别已设为 %s", logging.getLevelName(_LEVEL))
 
 # 模型配置字典：API key 与 base_url 均从 .env 读取（key 名与 .env 一致）
 MODEL_CONFIGS = {
@@ -97,7 +104,7 @@ def initialize_llm(llm_type: str = DEFAULT_LLM_TYPE) -> tuple[ChatOpenAI, Huggin
             api_key=config["api_key"],
             model=config["chat_model"],
             temperature=DEFAULT_TEMPERATURE,
-            timeout=30,  # 添加超时配置（秒）
+            timeout=_LLM_TIMEOUT,  # 超时配置（秒），见 config.LLM_TIMEOUT
             max_retries=2  # 添加重试次数
         )
         
@@ -133,7 +140,7 @@ def get_single_llm(llm_type: str = DEFAULT_LLM_TYPE):
             api_key=config["api_key"],
             model=config["chat_model"],
             temperature=DEFAULT_TEMPERATURE,
-            timeout=30,  # 添加超时配置（秒）
+            timeout=_LLM_TIMEOUT,  # 超时配置（秒），见 config.LLM_TIMEOUT
             max_retries=2  # 添加重试次数
         )
         logger.info(f"成功初始化 {llm_type} LLM")
