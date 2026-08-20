@@ -216,8 +216,12 @@ async def _summarize_history(existing_summary: str, dropped_messages: list) -> s
     return str(res.content).strip()
 
 
-def create_nodes(map_tools):
-    """根据高德工具集合构造 workflow 的节点函数（闭包持有工具）。"""
+def create_nodes(map_tools, skill_text: str = ""):
+    """根据高德工具集合构造 workflow 的节点函数（闭包持有工具）。
+
+    skill_text: 命中的技能正文（如 itinerary-planning），注入 planner prompt；
+                默认空串 = 不加技能（保持原行为）。
+    """
     tools = {t.name: t for t in map_tools}
     geo_tool = tools["maps_geo"]
     weather_tool = tools["maps_weather"]
@@ -309,6 +313,7 @@ def create_nodes(map_tools):
             "memories": state.get("memories") or "（暂无相关记忆）",
             "history": _format_history(state) or "（暂无对话历史）",
             "feedback": state.get("feedback") or "（无）",
+            "skill": skill_text or "（无）",
         }
 
     async def _generate_itinerary_json(state: TravelState) -> dict | None:
@@ -500,15 +505,22 @@ async def _extract_knowledge(destination: str, itinerary: str) -> list[str]:
     ]
 
 
-def build_workflow(map_tools, memory=None):
+def build_workflow(map_tools, memory=None, skills=None):
     """构建并编译 LangGraph workflow。
 
     Args:
         map_tools: 来自 utils.tools.get_map_tools()。
         memory:    utils.memory.MemoryManager，传入后启用长短期记忆节点并以
                    Postgres 作为 thread 级 checkpointer；为 None 时保持原 4 节点流程。
+        skills:    utils.skills.Skill 列表（可选）。传入后把命中的 itinerary-planning
+                   技能正文注入 planner prompt（【技能规范】）；None/空则保持原行为。
     """
-    geocode, get_weather, search_pois, plan_itinerary, do_research, enrich_routes, enrich_images = create_nodes(map_tools)
+    skill_text = ""
+    if skills:
+        hit = next((s for s in skills if s.name == "itinerary-planning"), None)
+        if hit is not None:
+            skill_text = hit.body()
+    geocode, get_weather, search_pois, plan_itinerary, do_research, enrich_routes, enrich_images = create_nodes(map_tools, skill_text)
 
     graph = StateGraph(TravelState)
     graph.add_node("geocode", geocode)

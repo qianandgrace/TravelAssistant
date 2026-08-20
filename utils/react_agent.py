@@ -10,10 +10,12 @@ LLM 在一个循环里自主决定调用哪个工具（Reason + Act），直到�
 import logging
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import dynamic_prompt
 from langchain_core.tools import tool
 
 from utils.llm import get_single_llm
 from utils.research import research_summary, search_guides
+from utils.skills import load_all_skills, select_skill_for_query, skill_descriptions
 
 logger = logging.getLogger(__name__)
 
@@ -75,13 +77,57 @@ def _curate_map_tools(map_tools) -> list:
     return [t for t in map_tools if t.name in _CURATED_TOOL_NAMES]
 
 
-def build_react_agent(map_tools=None, model=None, with_research: bool = True):
+def _last_user_message(request) -> str:
+    """从 ModelRequest.state["messages"] 取最近一条用户输入（对话消息可能是文本块列表）。"""
+    msgs = (request.state or {}).get("messages") or []
+    for m in reversed(msgs):
+        if getattr(m, "type", None) == "human":
+            c = getattr(m, "content", "")
+            if isinstance(c, list):
+                c = "".join(
+                    b.get("text", "") if isinstance(b, dict) else str(b) for b in c
+                )
+            return str(c)
+    return ""
+
+
+def _build_skill_middleware():
+    """Skill 渐进式披露：短 base + 常驻 description，命中意图时注入单个 skill 正文。
+
+    返回 langchain AgentMiddleware（dynamic_prompt 装饰器产出），只改变每轮请求的
+    system prompt，不改变工具集与 agent 调用方式。
+    """
+    skills = load_all_skills()
+    base = (
+        "你是旅行行程规划助手。先判断用户意图，再选用下方命中当前请求的技能，"
+        "按技能指令执行。基于工具返回的真实数据作答，不要编造景点。\n\n"
+        "【可用技能】（命中时按需加载）\n"
+        f"{skill_descriptions(skills)}"
+    )
+
+    @dynamic_prompt
+    def skill_prompt(request) -> str:
+        query = _last_user_message(request)
+        hit = select_skill_for_query(query, skills)
+        parts = [base]
+        if hit is not None:
+            parts.append("\n\n" + hit.body())
+        return "\n".join(parts)
+
+    return skill_prompt
+
+
+def build_react_agent(map_tools=None, model=None, with_research: bool = True,
+                      with_skills: bool = False):
     """用 langchain.agents.create_agent 构建 ReAct 旅行 agent。
 
     Args:
         map_tools: get_map_tools() 返回的全量高德工具（内部精选子集）；None 则不带地图工具。
         model: BaseChatModel；默认 get_single_llm("qwen")（与 workflow 主模型一致）。
         with_research: 是否挂上 travel_research 攻略工具（对齐 workflow 的 do_research）。
+        with_skills: 是否启用 Skills 渐进式披露（默认 False，行为不变）。开启时
+            系统提示改为「短 base + 常驻 description + 规则命中的单个 skill 正文」，
+            通过 dynamic_prompt middleware 按请求注入。
 
     Returns:
         编译好的 CompiledStateGraph，用 `await agent.ainvoke({"messages": [("user", query)]})`
@@ -98,9 +144,15 @@ def build_react_agent(map_tools=None, model=None, with_research: bool = True):
         tools.append(travel_research)
     if not tools:
         logger.warning("ReAct agent 没有任何工具，仅作纯文本回答。")
-    agent = create_agent(model=llm, tools=tools, system_prompt=SYSTEM_PROMPT,
-                         name="react_travel_agent")
-    return agent
+    kwargs = dict(model=llm, tools=tools)
+    if with_skills:
+        kwargs.update(
+            middleware=[_build_skill_middleware()],
+            name="react_travel_agent_skills",
+        )
+    else:
+        kwargs.update(system_prompt=SYSTEM_PROMPT, name="react_travel_agent")
+    return create_agent(**kwargs)
 
 
 if __name__ == "__main__":
