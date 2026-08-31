@@ -2,6 +2,7 @@
 import os
 import logging
 import sys
+from langchain_core.embeddings import Embeddings
 from langchain_openai import ChatOpenAI
 # 注意：langchain_huggingface 的 HuggingFaceEmbeddings 不在顶部 import——它会立即拉起 torch，
 # 云端（EMBEDDING_PROVIDER=qwen）镜像不装 torch，一旦顶部 import 服务会启动即崩。
@@ -62,11 +63,14 @@ class LLMInitializationError(Exception):
     pass
 
 
-class QwenEmbeddings:
+class QwenEmbeddings(Embeddings):
     """通义（DashScope）embedding 的 OpenAI 兼容端点封装，显式 768 维对齐 pgvector。
 
-    LangGraph store 语义索引要求 embed 对象提供 embed_documents / embed_query 两个方法；
-    用 requests 直连（不引额外 SDK），text-embedding-v4 支持 dimensions=768 指定输出维度。
+    必须继承 langchain_core.embeddings.Embeddings：langgraph store 的
+    _ensure_index_config 会用它判断 embed 是「Embeddings 实例」还是「可调用函数」。
+    不继承会被当普通函数包进 EmbeddingsLambda，调用时报 object is not callable。
+    text-embedding-v4 支持 dimensions=768 指定输出维度，基类的 aembed_documents/
+    aembed_query 会在线程池里跑同步方法，满足 store 的异步调用。
     """
 
     def __init__(self, api_key: str, base_url: str, model: str, dimensions: int = 768):

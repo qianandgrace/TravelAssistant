@@ -234,8 +234,12 @@ async def write_long_term(request: LongMemRequest):
     sm = app.state.session_manager
     if not await sm.user_id_exists(request.user_id):
         raise HTTPException(status_code=404, detail="用户不存在")
-    async with MemoryManager(user_id=request.user_id) as memory:
-        await memory.write_user_memory(request.user_id, request.memory_info)
+    try:
+        async with MemoryManager(user_id=request.user_id) as memory:
+            await memory.write_user_memory(request.user_id, request.memory_info)
+    except Exception as e:  # noqa: BLE001 - embedding/DB 故障要明确报错而非静默 500
+        logger.warning("写入长期记忆失败：%s", e)
+        raise HTTPException(status_code=400, detail=f"写入长期记忆失败：{e}")
     return {"status": "success", "message": "记忆写入成功"}
 
 
