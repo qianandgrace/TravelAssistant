@@ -1,0 +1,78 @@
+# 生产部署编排（阿里云轻量 + Docker CE）
+# 使用：在项目根目录放好 .env（含真实 key），然后
+#   docker compose -f docker-compose.prod.yml up -d --build
+# 服务：postgres(pgvector) / redis / web(FastAPI:8001) / worker(Celery) / webui(Gradio:7860)
+version: "3.8"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg15-trixie
+    container_name: travel_pg
+    environment:
+      POSTGRES_USER: gq210
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-123456}
+      POSTGRES_DB: postgres
+      TZ: Asia/Shanghai
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # 不映射端口到宿主机：只在内网被 web/worker 访问
+
+  redis:
+    image: redis:7
+    container_name: travel_redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # 不映射端口到宿主机
+
+  web:
+    build: .
+    container_name: travel_web
+    command: uvicorn server:app --host 0.0.0.0 --port 8001
+    env_file: .env
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    container_name: travel_worker
+    command: celery -A utils.tasks worker --loglevel=info
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  webui:
+    build: .
+    container_name: travel_webui
+    command: python webapp.py
+    environment:
+      API_BASE_URL: http://web:8001
+      GRADIO_HOST: "0.0.0.0"
+      GRADIO_PORT: "7860"
+    ports:
+      - "7860:7860"
+    depends_on:
+      - web
+    restart: unless-stopped
+
+volumes:
+  pgdata:

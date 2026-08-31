@@ -3,8 +3,9 @@ import os
 import logging
 import sys
 from langchain_openai import ChatOpenAI
-from langchain_community.embeddings import HuggingFaceBgeEmbeddings
-from langchain_huggingface import HuggingFaceEmbeddings
+# 注意：langchain_huggingface 的 HuggingFaceEmbeddings 不在顶部 import——它会立即拉起 torch，
+# 云端（EMBEDDING_PROVIDER=qwen）镜像不装 torch，一旦顶部 import 服务会启动即崩。
+# 因此只在 get_embedding_model() 的 local 分支里惰性导入。
 # 将项目根目录加入 sys.path，保证包内引用可用（以便从项目根运行脚本）
 CURRENT_DIR = os.path.dirname(__file__)
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, os.pardir)) # 调试断点，检查路径设置是否正确
@@ -61,20 +62,80 @@ class LLMInitializationError(Exception):
     pass
 
 
-def get_embedding_model() -> HuggingFaceEmbeddings:
-    """返回固定的 bge 中文 embedding 模型（768 维，CPU，归一化）。
+class QwenEmbeddings:
+    """通义（DashScope）embedding 的 OpenAI 兼容端点封装，显式 768 维对齐 pgvector。
 
-    长期记忆的语义检索等场景复用同一个模型，避免重复初始化。
+    LangGraph store 语义索引要求 embed 对象提供 embed_documents / embed_query 两个方法；
+    用 requests 直连（不引额外 SDK），text-embedding-v4 支持 dimensions=768 指定输出维度。
     """
-    model_name = r"C:\Users\qian gao\models\BAAI\bge-base-zh-v1___5"
+
+    def __init__(self, api_key: str, base_url: str, model: str, dimensions: int = 768):
+        self._api_key = api_key
+        self._base_url = base_url.rstrip("/")
+        self._model = model
+        self._dimensions = dimensions
+
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        import requests
+
+        resp = requests.post(
+            f"{self._base_url}/embeddings",
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self._model,
+                "input": texts,
+                "dimensions": self._dimensions,
+                "encoding_format": "float",
+            },
+            timeout=120,
+        )
+        resp.raise_for_status()
+        items = resp.json()["data"]
+        out: list[list[float] | None] = [None] * len(texts)
+        for it in items:
+            out[it["index"]] = it["embedding"]
+        return [v for v in out if v is not None]
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(list(texts))
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed([text])[0]
+
+
+def get_embedding_model() -> "HuggingFaceEmbeddings | QwenEmbeddings":
+    """返回 embedding 模型，供长期记忆语义检索复用（768 维，需与 pgvector 列 dims 对齐）。
+
+    EMBEDDING_PROVIDER 决定用哪种：
+      - "qwen"：走通义 embedding API（OpenAI 兼容端点，text-embedding-v4，显式 768 维），
+        云上部署用——免装 torch/sentence-transformers，镜像小、免维护本地模型；
+      - 默认 "local"：本地 bge-base-zh-v1.5（CPU，768 维），模型路径 BGE_MODEL_PATH，
+        默认 HF 模型 id（首次自动下载），本地可指向已有缓存目录复用。
+    """
+    provider = os.getenv("EMBEDDING_PROVIDER", "local")
+    if provider == "qwen":
+        return QwenEmbeddings(
+            api_key=os.getenv("QWEN_API_KEY", ""),
+            base_url=os.getenv(
+                "QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            ),
+            model=os.getenv("EMBEDDING_MODEL", "text-embedding-v4"),
+            dimensions=768,
+        )
+    model_name = os.getenv("BGE_MODEL_PATH", "BAAI/bge-base-zh-v1.5")
     model_kwargs = {"device": "cpu"}
     encode_kwargs = {"normalize_embeddings": True}
+    from langchain_huggingface import HuggingFaceEmbeddings  # 惰性：只有 local 分支才会触发 torch
+
     return HuggingFaceEmbeddings(
         model_name=model_name, model_kwargs=model_kwargs, encode_kwargs=encode_kwargs
     )
 
 
-def initialize_llm(llm_type: str = DEFAULT_LLM_TYPE) -> tuple[ChatOpenAI, HuggingFaceBgeEmbeddings]:
+def initialize_llm(llm_type: str = DEFAULT_LLM_TYPE) -> "tuple[ChatOpenAI, HuggingFaceEmbeddings | QwenEmbeddings]":
     """
     初始化LLM实例
 
@@ -152,7 +213,7 @@ def get_single_llm(llm_type: str = DEFAULT_LLM_TYPE):
         logger.error(f"初始化LLM失败: {str(e)}")
         raise LLMInitializationError(f"初始化LLM失败: {str(e)}")
 
-def get_llm(llm_type: str = DEFAULT_LLM_TYPE) -> tuple[ChatOpenAI, HuggingFaceBgeEmbeddings]:
+def get_llm(llm_type: str = DEFAULT_LLM_TYPE) -> "tuple[ChatOpenAI, HuggingFaceEmbeddings | QwenEmbeddings]":
     """
     获取LLM实例的封装函数，提供默认值和错误处理
 

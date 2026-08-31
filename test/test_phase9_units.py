@@ -60,10 +60,14 @@ def _nodes():
 
 
 async def _weather_poi_degrade():
-    geocode, get_weather, search_pois, *_ = _nodes()
-    w = await get_weather({"destination": "东京"})
+    (geocode, get_weather, collect_context, plan_itinerary,
+     do_research, enrich_routes, enrich_images, search_pois_worker) = _nodes()
+    w = await get_weather({"city": "东京"})
     assert w == {"weather": ""}, f"天气失败应降级为空，实际 {w}"
-    p = await search_pois({"location": "139.7,35.7"})
+    cmd = await collect_context({"location": "139.7,35.7", "destination": "东京"})
+    sends = list(getattr(cmd, "goto", []) or [])
+    assert len(sends) == 4, "collect_context 应派发 4 个 Send 子任务（3 类 POI + 天气）"
+    p = await search_pois_worker({"category": "景点", "location": "139.7,35.7"})
     assert p == {"pois": []}, f"POI 失败应降级为空，实际 {p}"
     print("[PASS] 单元：天气/POI 服务失败 -> 降级（不抛异常，不阻断规划）")
 

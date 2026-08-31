@@ -1,0 +1,14 @@
+.env
+.git
+.gitignore
+pgdata
+pgdata2
+logfile
+graph
+benchmark_out
+exports
+__pycache__
+*.pyc
+.claude
+render_workflow_png.py
+test

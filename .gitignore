@@ -21,3 +21,6 @@ exports/
 
 # env 文件
 .env
+
+# 简历文档
+resume_project.md

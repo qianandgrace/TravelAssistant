@@ -4,41 +4,49 @@
 每个节点在代码里确定性地调用某个高德工具，LLM 只在最后的行程合成节点被调用。
 
 图结构（传 memory 时）：
-    START ─ geocode ─┬─ search_pois ─┬─ retrieve_memory ─ summarize_conversation ─ do_research ─ plan_itinerary
-                     └─ get_weather ─┘                                                                   │
-                              review_itinerary ◄──(reject，带 feedback 回 plan_itinerary 重规划)──┘
+    START ─ geocode ─ collect_context ──[Send×4]──┬─ search_pois_worker ×3 ─┐
+                                                 └─ get_weather ────────────┴─ retrieve_memory ─ summarize_conversation
+    ─ do_research ─ plan_itinerary ─ enrich_routes ─ enrich_images ─ review_itinerary
+                              review_itinerary ◄──(reject，Command(goto) 带 feedback 回 plan_itinerary 重规划)──┘
                               │ (accept / edit)
                               ▼
                         extract_memory ─ save_memory ─ END
 
   geocode                : maps_geo 目的地名 -> 经纬度 + adcode
-  get_weather            : maps_weather 查天气（依赖 geocode，保证与 search_pois 同一步汇合）
-  search_pois            : maps_around_search 按坐标搜景点/美食/酒店
+  collect_context        : map 阶段：Command(goto=[Send...]) 把天气 + 3 类 POI 扇出为 4 个并行 worker
+  get_weather            : 天气 worker（Send 派发）：maps_weather 查天气，失败降级为空
+  search_pois_worker     : 单个分类的 maps_around_search，返回该分类的部分 POI 列表（reducer 归并）
   do_research            : Travel Research：搜索攻略来源（配置了 TAVILY_API_KEY 时）+ 生成紧凑研究摘要
   retrieve_memory        : 语义检索长期记忆（episodic + semantic）+ 把本轮用户请求追加进 messages
   summarize_conversation : 短期记忆扩容：trim_messages 裁掉过旧对话，被裁部分用 LLM 合并进累计 summary
   plan_itinerary         : LLM 把 POI + 天气 + 研究摘要 + 天数 + 记忆 + 历史对话 + 修改意见合成逐日行程（严格 JSON）
   enrich_routes          : 地图服务填充：poi_id/geocode 解析每个 item 真实坐标，每天步行方向算真实距离/时长（LLM 不参与）
   enrich_images          : POI/搜索 API 真实图片填充 item.image，失败回退占位图（LLM 不编造 URL）
-  review_itinerary       : interrupt：让用户 接受/编辑/拒绝；拒绝则带 feedback 回 plan_itinerary 重新规划
+  review_itinerary       : interrupt：让用户 接受/编辑/拒绝；拒绝则用 Command(goto="plan_itinerary") 带回 feedback 重新规划
   extract_memory         : LLM 从行程提炼通用旅游知识（semantic 记忆内容）
   save_memory            : interrupt 确认后落库 episodic/semantic（best-effort）
 
+控制流机制（为解释性，刻意使用了 LangGraph 三类派发方式）：
+  - Send 动态扇出（map-reduce）：collect_context 返回 Command(goto=[Send(...)])，把天气 + 3 类 POI
+    拆成 4 个并行 worker；poi 由 reducer（_reduce_pois）归并。全部 worker 在同一 superstep 完成，
+    汇合节点只触发一次（天气若放在 geocode 并行出边会早一个 superstep 完成、导致汇合重复触发）；
+  - Command(goto=...)：review_itinerary 在节点内边更新 state、边决定下一条边（reject -> 回
+    plan_itinerary / accept -> extract_memory），替换原来的 add_conditional_edges
+    （路由逻辑内聚进节点，代价是图上不再显示这条分支）。
+
 注意：interrupt 节点在 resume 时会从头重跑，`interrupt()` 前的代码会执行两次，
 因此昂贵的 LLM 工作（plan_itinerary、extract_memory）都拆在中断节点之前、各自独立完成。
-注意：get_weather 与 search_pois 共用 geocode 作为前驱，确保两条并行分支
-在同一 superstep 完成，否则汇合节点（多入边）会被重复触发。
 """
 import asyncio
 import datetime
 import json
 import logging
 import os
-from typing import TypedDict
+from typing import Annotated, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, trim_messages
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import interrupt
+from langgraph.types import Command, Send, interrupt
 
 from utils.config import config
 from utils.images import fill_item_images
@@ -73,6 +81,15 @@ POI_CATEGORIES = ("景点", "美食", "酒店")
 ROUTE_PLACE_TYPES = {"景点", "美食", "酒店"}
 
 
+def _reduce_pois(current: list | None, update: list) -> list:
+    """Send 并行 POI 搜索（map-reduce）的归并 reducer：各分类 worker 返回的部分列表拼接。
+
+    无 reducer 时并行写 `pois` 会互相覆盖（last-writer-wins）；
+    加了 reducer 后 3 个 worker 的结果按序拼接，plan_itinerary 读到完整 POI 列表。
+    """
+    return list(current or []) + list(update)
+
+
 class TravelState(TypedDict, total=False):
     destination: str    # 目的地名
     days: int           # 旅行天数
@@ -81,7 +98,7 @@ class TravelState(TypedDict, total=False):
     start_date: str     # 出发日期 YYYY-MM-DD（可选，来自实体抽取）
     location: str       # 经纬度 "lng,lat"
     adcode: str         # 城市编码
-    pois: list          # POI 列表 [{category, name, address, id, location}]
+    pois: Annotated[list, _reduce_pois]  # POI 列表 [{category, name, address, id, location}]（3 个分类 worker 并行归并）
     weather: str        # 天气文本
     research: dict      # Travel Research 摘要 {area_clusters, common_routes, ..., sources}
     memories: str       # retrieve_memory 检索到的长期记忆文本
@@ -240,43 +257,59 @@ def create_nodes(map_tools, skill_text: str = ""):
                      state["destination"], first["location"], first.get("adcode", ""))
         return {"location": first["location"], "adcode": first.get("adcode", "")}
 
-    async def get_weather(state: TravelState) -> dict:
-        """天气是锦上添花的上下文：失败返回空，绝不阻断规划。"""
+    async def get_weather(state: dict) -> dict:
+        """天气 worker（由 collect_context 以 Send 派发，入参为 {"city": ...}）。
+        天气是锦上添花的上下文：失败返回空，绝不阻断规划。"""
         try:
-            res = await weather_tool.ainvoke({"city": state["destination"]})
+            res = await weather_tool.ainvoke({"city": state["city"]})
             weather = _format_weather(_parse_json(res))
-            logger.debug("[get_weather] %s -> %s", state["destination"], weather or "（无天气数据）")
+            logger.debug("[get_weather] %s -> %s", state["city"], weather or "（无天气数据）")
             return {"weather": weather}
         except Exception as e:  # noqa: BLE001 - 天气失败降级为空
             logger.warning("天气获取失败（降级为空）：%s", e)
             return {"weather": ""}
 
-    async def search_pois(state: TravelState) -> dict:
-        """POI 失败降级为空列表（planner 有『未获取到 POI 数据』兜底），不阻断规划。"""
+    async def collect_context(state: TravelState):
+        """map 阶段：把天气查询 + 3 类 POI 搜索打包成 4 个并行的 Send 子任务。
+
+        langgraph 1.x 用 Command(goto=[Send(...)]) 动态扇出。get_weather 也纳入扇出
+        （而不是作为 geocode 的并行出边）——否则 get_weather 会比 Send worker 早一个
+        superstep 完成，导致汇合节点重复触发（plan 执行两次、itinerary_data 同一步冲突）。
+        """
         location = state["location"]
+        sends = [
+            Send("search_pois_worker", {"category": c, "location": location})
+            for c in POI_CATEGORIES
+        ]
+        sends.append(Send("get_weather", {"city": state["destination"]}))
+        logger.debug("[collect_context] 派发 %d 个并行子任务：%s + 天气",
+                     len(sends), "、".join(POI_CATEGORIES))
+        return Command(goto=sends)
+
+    async def search_pois_worker(state: dict) -> dict:
+        """单个分类的搜索 worker：POI 失败降级为空列表（planner 有『未获取到 POI 数据』兜底），不阻断规划。"""
+        category = state["category"]
         pois = []
         try:
-            for category in POI_CATEGORIES:
-                res = await around_tool.ainvoke(
-                    {"keywords": category, "location": location, "radius": "30000"}
-                )
-                data = _parse_json(res)
-                for p in data.get("pois", [])[:MAX_POIS_PER_CATEGORY]:
-                    pois.append(
-                        {
-                            "category": category,
-                            "name": p.get("name", ""),
-                            "address": p.get("address", ""),
-                            "id": p.get("id", ""),          # 供 LLM 引用 poi_id / Phase 5 匹配坐标
-                            "location": p.get("location", ""),  # "lng,lat"，Phase 5 使用
-                            "photo": p.get("photo", ""),        # 真实 POI 图，Phase 6 使用
-                        }
-                    )
+            res = await around_tool.ainvoke(
+                {"keywords": category, "location": state["location"], "radius": "30000"}
+            )
+            data = _parse_json(res)
+            pois = [
+                {
+                    "category": category,
+                    "name": p.get("name", ""),
+                    "address": p.get("address", ""),
+                    "id": p.get("id", ""),          # 供 LLM 引用 poi_id / Phase 5 匹配坐标
+                    "location": p.get("location", ""),  # "lng,lat"，Phase 5 使用
+                    "photo": p.get("photo", ""),        # 真实 POI 图，Phase 6 使用
+                }
+                for p in data.get("pois", [])[:MAX_POIS_PER_CATEGORY]
+            ]
         except Exception as e:  # noqa: BLE001 - POI 失败降级为空
             logger.warning("POI 搜索失败（降级为空）：%s", e)
             pois = []
-        logger.debug("[search_pois] %s 共获取 %d 个 POI（按分类：%s）",
-                     location, len(pois), {c: sum(1 for p in pois if p["category"] == c) for c in POI_CATEGORIES})
+        logger.debug("[search_pois_worker] %s 搜到 %d 个 POI", category, len(pois))
         return {"pois": pois}
 
     async def do_research(state: TravelState) -> dict:
@@ -480,8 +513,8 @@ def create_nodes(map_tools, skill_text: str = ""):
         return {"itinerary_data": data, "itinerary": render_itinerary_md(data)}
 
     return (
-        geocode, get_weather, search_pois, plan_itinerary,
-        do_research, enrich_routes, enrich_images,
+        geocode, get_weather, collect_context, plan_itinerary,
+        do_research, enrich_routes, enrich_images, search_pois_worker,
     )
 
 
@@ -520,12 +553,13 @@ def build_workflow(map_tools, memory=None, skills=None):
         hit = next((s for s in skills if s.name == "itinerary-planning"), None)
         if hit is not None:
             skill_text = hit.body()
-    geocode, get_weather, search_pois, plan_itinerary, do_research, enrich_routes, enrich_images = create_nodes(map_tools, skill_text)
+    geocode, get_weather, collect_context, plan_itinerary, do_research, enrich_routes, enrich_images, search_pois_worker = create_nodes(map_tools, skill_text)
 
     graph = StateGraph(TravelState)
     graph.add_node("geocode", geocode)
+    graph.add_node("collect_context", collect_context)
     graph.add_node("get_weather", get_weather)
-    graph.add_node("search_pois", search_pois)
+    graph.add_node("search_pois_worker", search_pois_worker)
     graph.add_node("do_research", do_research)
     graph.add_node("plan_itinerary", plan_itinerary)
     graph.add_node("enrich_routes", enrich_routes)
@@ -586,8 +620,13 @@ def build_workflow(map_tools, memory=None, skills=None):
                 "summarized_count": summarized,
             }
 
-        async def review_itinerary(state: TravelState) -> dict:
-            """HITL：interrupt 让用户接受 / 编辑 / 拒绝生成的行程。"""
+        async def review_itinerary(state: TravelState):
+            """HITL：interrupt 让用户接受 / 编辑 / 拒绝生成的行程。
+
+            用 Command(update=..., goto=...) 在节点内边更新 state、边决定下一条边：
+            reject -> 回 plan_itinerary 重新规划（带 feedback）；accept/edit -> 进入记忆提炼。
+            取代原来的 add_conditional_edges（路由逻辑内聚进节点）。
+            """
             logger.debug("[review_itinerary] 行程已生成，中断等待用户裁决（接受/编辑/拒绝）")
             decision = interrupt(
                 {"kind": "review_itinerary", "itinerary": state.get("itinerary", "")}
@@ -599,22 +638,26 @@ def build_workflow(map_tools, memory=None, skills=None):
                 edited = str(decision.get("text") or "").strip() or itinerary
                 logger.debug("[review_itinerary] 用户选择「编辑」行程：%s", edited[:40])
                 msgs.append(AIMessage(content=edited))
-                return {
-                    "itinerary": edited,
-                    "user_action": "accept",
-                    "feedback": "",
-                    "messages": msgs,
-                }
+                return Command(
+                    update={"itinerary": edited, "user_action": "accept", "feedback": "", "messages": msgs},
+                    goto="extract_memory",
+                )
             if action == "reject":
                 fb = str(decision.get("text") or "").strip()
                 logger.debug("[review_itinerary] 用户选择「拒绝」，意见：%s", fb[:40] or "（无）")
                 if fb:
                     msgs.append(HumanMessage(content=f"对行程不满意，修改意见：{fb}"))
-                return {"user_action": "reject", "feedback": fb, "messages": msgs}
+                return Command(
+                    update={"user_action": "reject", "feedback": fb, "messages": msgs},
+                    goto="plan_itinerary",
+                )
             # accept：沿用当前 itinerary
             logger.debug("[review_itinerary] 用户选择「接受」行程，进入记忆确认")
             msgs.append(AIMessage(content=itinerary))
-            return {"user_action": "accept", "feedback": "", "messages": msgs}
+            return Command(
+                update={"user_action": "accept", "feedback": "", "messages": msgs},
+                goto="extract_memory",
+            )
 
         async def extract_memory(state: TravelState) -> dict:
             """LLM 提炼通用旅游知识（独立节点，避免 interrupt 重跑重复耗 LLM）。"""
@@ -657,12 +700,13 @@ def build_workflow(map_tools, memory=None, skills=None):
         graph.add_node("save_memory", save_memory)
 
     graph.add_edge(START, "geocode")
-    graph.add_edge("geocode", "search_pois")
-    graph.add_edge("geocode", "get_weather")  # 与 search_pois 并行，且与汇合点同一步完成
+    # collect_context 用 Command(goto=[Send...]) 把天气 + 3 类 POI 扇出为 4 个并行 worker
+    graph.add_edge("geocode", "collect_context")
 
     if memory is not None:
-        # 汇合点：search_pois / get_weather 同一步完成后进入 retrieve_memory，只触发一次
-        graph.add_edge("search_pois", "retrieve_memory")
+        # 汇合点：4 个 Send worker（3 类 POI + 天气）在同一 superstep 全部完成后
+        # 进入 retrieve_memory，只触发一次。
+        graph.add_edge("search_pois_worker", "retrieve_memory")
         graph.add_edge("get_weather", "retrieve_memory")
         graph.add_edge("retrieve_memory", "summarize_conversation")
         graph.add_edge("summarize_conversation", "do_research")
@@ -671,17 +715,14 @@ def build_workflow(map_tools, memory=None, skills=None):
         graph.add_edge("plan_itinerary", "enrich_routes")
         graph.add_edge("enrich_routes", "enrich_images")
         graph.add_edge("enrich_images", "review_itinerary")
-        graph.add_conditional_edges(
-            "review_itinerary",
-            lambda s: "plan_itinerary" if s.get("user_action") == "reject" else "extract_memory",
-            {"plan_itinerary": "plan_itinerary", "extract_memory": "extract_memory"},
-        )
+        # review_itinerary 用 Command(goto=...) 自决去向（reject->plan_itinerary / accept->extract_memory），
+        # 不再需要 add_conditional_edges。
         graph.add_edge("extract_memory", "save_memory")
         graph.add_edge("save_memory", END)
         return graph.compile(checkpointer=memory.checkpointer)
 
     # 无记忆分支：汇合点在 do_research
-    graph.add_edge("search_pois", "do_research")
+    graph.add_edge("search_pois_worker", "do_research")
     graph.add_edge("get_weather", "do_research")  # 汇合点（同一步完成，只触发一次）
     graph.add_edge("do_research", "plan_itinerary")
     graph.add_edge("plan_itinerary", "enrich_routes")

@@ -572,4 +572,7 @@ with gr.Blocks(title="旅游行程规划 Agent") as demo:
 
 
 if __name__ == "__main__":
-    demo.launch(server_name="127.0.0.1", server_port=7860)
+    demo.launch(
+        server_name=os.getenv("GRADIO_HOST", "127.0.0.1"),
+        server_port=int(os.getenv("GRADIO_PORT", "7860")),
+    )

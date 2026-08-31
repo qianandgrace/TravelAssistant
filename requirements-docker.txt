@@ -1,0 +1,26 @@
+# 服务端运行依赖（web / worker / webui 用；去掉了 pygraphviz/grandalf 图快照依赖）
+# 与 requirements.txt 的区别：加入 langchain-community / langchain-huggingface / sentence-transformers（bge embedding 需要），
+# 去掉 pygraphviz / grandalf（只在本地 CLI 保存图快照用，镜像里会因缺 graphviz 系统库而装不上）
+langgraph>=1.1.6
+langchain-core>=1.2.23
+langchain-openai>=1.1.12
+langchain-community>=0.3.0
+langchain-huggingface>=0.1.0
+langchain-mcp-adapters>=0.2.2
+mcp>=1.26.0
+python-dotenv>=1.0
+# 长短期记忆：Postgres + pgvector 语义检索 + thread 级 checkpointer
+psycopg[binary]>=3.1
+psycopg_pool>=3.1
+langgraph-checkpoint-postgres>=3.0
+# 中文 embedding：云端走通义 API（EMBEDDING_PROVIDER=qwen），不需要 torch / sentence-transformers。
+# langchain-community / langchain-huggingface 仍是 llm.py 顶部 import 的必需包（轻量，不带 torch）
+langchain-community>=0.3.0
+langchain-huggingface>=0.1.0
+# Web 服务化：Redis 会话状态 + Celery 异步任务 + FastAPI + Gradio 前端
+celery>=5.3
+redis>=4.5
+fastapi>=0.100
+uvicorn>=0.23
+gradio>=4.0
+requests>=2.31

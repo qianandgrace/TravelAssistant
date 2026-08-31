@@ -44,8 +44,10 @@ def _print_node(node_name: str, data: dict) -> None:
         print(f"  [OK] geocode             : 坐标={data.get('location')}  adcode={data.get('adcode')}")
     elif node_name == "get_weather":
         print(f"  [OK] get_weather         : 天气=\n{data.get('weather')}")
-    elif node_name == "search_pois":
-        print(f"  [OK] search_pois         : 搜到 {len(data.get('pois', []))} 个 POI（景点/美食/酒店）")
+    elif node_name == "collect_context":
+        print("  [OK] collect_context     : 扇出 4 个并行子任务（3 类 POI + 天气，Send map-reduce）")
+    elif node_name == "search_pois_worker":
+        print(f"  [OK] search_pois_worker   : 本分类搜到 {len(data.get('pois', []))} 个 POI")
     elif node_name == "retrieve_memory":
         has_mem = bool(data.get("memories"))
         print(f"  [OK] retrieve_memory     : {'检索到相关记忆' if has_mem else '暂无相关记忆'}")
@@ -139,6 +141,8 @@ async def run(destination: str, days: int, preference: str = "") -> dict:
                         continue
                     if node_name == "__interrupt__":
                         interrupts.extend(data)  # tuple[Interrupt, ...]
+                        continue
+                    if not isinstance(data, dict):  # fan_out 返回 [Send, ...] 等，非状态更新，跳过
                         continue
                     _print_node(node_name, data)
                     result.update(data)
